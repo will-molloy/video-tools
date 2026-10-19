@@ -6,8 +6,6 @@
 
 use std::fmt;
 
-use serde::{Serialize, Serializer};
-
 use crate::ffprobe::Ratio;
 
 /// Video intervals within this many ticks of the nominal frame duration count as regular.
@@ -124,7 +122,7 @@ impl Track {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Span {
     pub start: Nanos,
     pub end: Nanos,
@@ -184,7 +182,7 @@ fn median(mut values: Vec<i64>) -> Option<i64> {
     Some(*values.select_nth_unstable(mid).1)
 }
 
-/// A signed time in nanoseconds. Serializes as seconds.
+/// A signed time in nanoseconds.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Nanos(i64);
 
@@ -252,23 +250,15 @@ impl fmt::Display for Nanos {
     }
 }
 
-impl Serialize for Nanos {
-    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        serializer.serialize_f64(self.as_secs_f64())
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Finding {
     pub stream: usize,
     pub severity: Severity,
     pub action: Action,
-    #[serde(flatten)]
     pub kind: FindingKind,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
-#[serde(rename_all = "snake_case")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Severity {
     /// Desync below [`PERCEPTIBLE`].
     Minor,
@@ -276,8 +266,7 @@ pub enum Severity {
     Major,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "snake_case")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Action {
     /// Rewrite video timestamps to exact frame multiples with the `setts` bitstream filter,
     /// without re-encoding. Valid only for jitter, because it keeps every frame.
@@ -313,15 +302,13 @@ impl Action {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "snake_case")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Media {
     Video,
     Audio,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FindingKind {
     EmptyStream {
         media: Media,

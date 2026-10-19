@@ -21,9 +21,9 @@ cargo uninstall video-tools
 ## Usage
 
 ```sh
-vt                           # open the TUI in the current directory
-vt chapters FILE             # print a YouTube description chapter list
-vt sync-check FILE [--json]  # diagnose audio/video sync problems
+vt                  # open the TUI in the current directory
+vt chapters FILE    # print a YouTube description chapter list
+vt sync-check FILE  # diagnose audio/video sync problems
 ```
 
 ## Development

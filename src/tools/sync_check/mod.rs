@@ -6,7 +6,6 @@ use std::{path::Path, path::PathBuf, process::ExitCode, time::Duration};
 
 use anyhow::{Context, Result};
 use clap::Args;
-use serde::{Serialize, Serializer};
 use tokio_util::sync::CancellationToken;
 
 use crate::ffprobe::{self, Ratio, StreamKind};
@@ -23,28 +22,20 @@ const PROGRESS_EVERY: u64 = 4096;
 pub struct SyncCheckArgs {
     /// Video file to check
     file: PathBuf,
-
-    /// Print the report as JSON
-    #[arg(long)]
-    json: bool,
 }
 
 /// Exits 0 when clean and 1 when there are findings. Errors exit 2 from `main`.
 pub async fn cli(args: &SyncCheckArgs) -> Result<ExitCode> {
     let report = run(&args.file, &CancellationToken::new(), |_| {}).await?;
-    if args.json {
-        println!("{}", serde_json::to_string_pretty(&report)?);
-    } else {
-        for line in report.header() {
-            println!("{line}");
-        }
-        println!();
-        if report.findings.is_empty() {
-            println!("{NO_ISSUES}");
-        }
-        for finding in &report.findings {
-            println!("{finding}");
-        }
+    for line in report.header() {
+        println!("{line}");
+    }
+    println!();
+    if report.findings.is_empty() {
+        println!("{NO_ISSUES}");
+    }
+    for finding in &report.findings {
+        println!("{finding}");
     }
     Ok(if report.findings.is_empty() {
         ExitCode::SUCCESS
@@ -161,34 +152,29 @@ fn estimate_packets(stream: &ffprobe::Stream, duration: Duration) -> u64 {
         .unwrap_or((per_sec * duration.as_secs_f64()) as u64)
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Report {
     pub video: VideoSummary,
     pub audio: Vec<AudioSummary>,
     pub findings: Vec<Finding>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct VideoSummary {
     pub index: usize,
     pub codec: String,
-    #[serde(serialize_with = "ratio")]
     pub frame_rate: Ratio,
     pub packets: usize,
     pub span: Option<Span>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct AudioSummary {
     pub index: usize,
     pub codec: String,
     pub sample_rate: u32,
     pub packets: usize,
     pub span: Option<Span>,
-}
-
-fn ratio<S: Serializer>(ratio: &Ratio, serializer: S) -> Result<S::Ok, S::Error> {
-    serializer.collect_str(ratio)
 }
 
 impl Report {

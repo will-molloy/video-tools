@@ -19,10 +19,9 @@ fn sync_check(args: &[&str]) -> String {
     )
 }
 
-/// Snapshots the human and JSON reports for one fixture.
+/// Snapshots the report for one fixture.
 fn check(fixture: &str) {
-    assert_snapshot!(format!("{fixture}.human"), sync_check(&[fixture]));
-    assert_snapshot!(format!("{fixture}.json"), sync_check(&["--json", fixture]));
+    assert_snapshot!(fixture, sync_check(&[fixture]));
 }
 
 #[test]
