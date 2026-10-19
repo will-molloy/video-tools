@@ -1,0 +1,10 @@
+---
+source: tests/chapters.rs
+expression: "chapters(\"clean-cfr.mp4\")"
+---
+exit: 1
+
+stdout:
+
+stderr:
+clean-cfr.mp4 has no chapters
