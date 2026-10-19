@@ -1,7 +1,10 @@
 ---
 source: tests/sync_check.rs
-expression: "sync_check(&[\"missing.mp4\"])"
+expression: "sync_check(\"missing.mp4\")"
 ---
 exit: 2
 
+stdout:
+
+stderr:
 Error: ffprobe failed: missing.mp4: No such file or directory
