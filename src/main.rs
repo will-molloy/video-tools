@@ -1,4 +1,8 @@
+#[expect(dead_code, reason = "the ML tools stacked on this use it")]
+mod ffmpeg;
 mod ffprobe;
+#[expect(dead_code, reason = "the ML tools stacked on this use it")]
+mod ml;
 mod tools;
 mod tui;
 
