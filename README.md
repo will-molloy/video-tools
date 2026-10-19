@@ -21,8 +21,9 @@ cargo uninstall video-tools
 ## Usage
 
 ```sh
-vt                # open the TUI in the current directory
-vt chapters FILE  # print a YouTube description chapter list
+vt                  # open the TUI in the current directory
+vt chapters FILE    # print a YouTube description chapter list
+vt sync-check FILE  # diagnose audio/video sync problems
 ```
 
 ## Development
@@ -32,6 +33,10 @@ cargo fmt
 cargo clippy --all-targets
 cargo test
 ```
+
+Tests need `ffprobe` on `PATH`.
+`tests/fixtures/gen.sh` regenerates the media fixtures with `ffmpeg` and checks each has its intended defect; `--check` only checks.
+Review snapshot changes with [`cargo insta`](https://insta.rs).
 
 Commits and PR titles follow [Conventional Commits](https://www.conventionalcommits.org).
 Merges to `main` tag a release, with the version bump derived from those commits.

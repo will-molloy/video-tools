@@ -1,0 +1,13 @@
+---
+source: tests/sync_check.rs
+expression: "sync_check(\"clean-cfr.mp4\")"
+---
+exit: 0
+
+stdout:
+Video #0: h264, 60 fps, 600 frames, 0:00.000 to 0:10.000
+Audio #1: aac, 48000 Hz, 469 packets, 0:00.000 to 0:10.005
+
+No sync issues found.
+
+stderr:

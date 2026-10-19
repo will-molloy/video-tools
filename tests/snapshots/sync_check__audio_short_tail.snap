@@ -1,0 +1,13 @@
+---
+source: tests/sync_check.rs
+expression: "sync_check(\"audio-short-tail.mp4\")"
+---
+exit: 1
+
+stdout:
+Video #0: h264, 60 fps, 600 frames, 0:00.000 to 0:10.000
+Audio #1: aac, 48000 Hz, 422 packets, 0:00.000 to 0:09.003
+
+major: audio #1 spans 997.3 ms less than video (truncated tail or clock drift). Fix: stretch audio to the video's length if it drifts out of sync toward the end; a truncated tail needs no fix.
+
+stderr:
