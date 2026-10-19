@@ -1,16 +1,32 @@
+mod ffprobe;
 mod tools;
 mod tui;
 
-use anyhow::Result;
-use clap::Parser;
+use std::process::ExitCode;
 
-/// Video processing toolbox.
+use anyhow::Result;
+use clap::{Parser, Subcommand};
+
+use tools::chapters::ChaptersArgs;
+
+/// Video processing toolbox. Run without a subcommand to open the TUI.
 #[derive(Debug, Parser)]
 #[command(name = "vt")]
-struct Cli {}
+struct Cli {
+    #[command(subcommand)]
+    command: Option<Command>,
+}
+
+#[derive(Debug, Subcommand)]
+enum Command {
+    /// Print chapters as a YouTube description chapter list
+    Chapters(ChaptersArgs),
+}
 
 #[tokio::main]
-async fn main() -> Result<()> {
-    Cli::parse();
-    tui::run().await
+async fn main() -> Result<ExitCode> {
+    match Cli::parse().command {
+        None => tui::run().await.map(|()| ExitCode::SUCCESS),
+        Some(Command::Chapters(args)) => tools::chapters::cli(&args).await,
+    }
 }
