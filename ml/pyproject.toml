@@ -4,6 +4,7 @@ version = "0.1.0"
 description = "The machine-learning stages of vt"
 requires-python = ">=3.12,<3.13"
 dependencies = [
+  # laion-clap, a SAM Audio dependency, caps numpy below 2.
   "numpy>=1.26.4",
   "soundfile>=0.14.0",
 ]
@@ -15,12 +16,29 @@ whisper = [
   "torch==2.11.0",
   "transformers>=5.20.1",
 ]
+sam = [
+  "sam-audio",
+  "torch==2.11.0",
+  "torchaudio==2.11.0",
+  # Each torchcodec release is built against one torch minor version.
+  "torchcodec>=0.11.1,<0.12",
+  "torchvision==0.26.0",
+]
+tiger = [
+  "huggingface-hub>=0.36.0",
+  "safetensors>=0.7.0",
+  "torch==2.11.0",
+]
 rocm = [
   "torch==2.11.0",
+  "torchaudio==2.11.0",
+  "torchvision==0.26.0",
   "triton-rocm",
 ]
 cuda = [
   "torch==2.11.0",
+  "torchaudio==2.11.0",
+  "torchvision==0.26.0",
 ]
 
 [project.scripts]
@@ -35,9 +53,21 @@ build-backend = "uv_build"
 
 [tool.uv]
 conflicts = [[{ extra = "rocm" }, { extra = "cuda" }]]
+# perception-models (a SAM Audio dependency) imports xformers at module level but never calls it
+# on the audio path, and xformers has no ROCm kernels for RDNA4. `sam.py` stubs the import instead.
+override-dependencies = ["xformers; sys_platform == 'never'"]
 
 [tool.uv.sources]
+sam-audio = { git = "https://github.com/facebookresearch/sam-audio", rev = "bb4c6999d2677c7402360e426afc01ddfad6dce0" }
 torch = [
+  { index = "pytorch-rocm", extra = "rocm" },
+  { index = "pytorch-cuda", extra = "cuda" },
+]
+torchaudio = [
+  { index = "pytorch-rocm", extra = "rocm" },
+  { index = "pytorch-cuda", extra = "cuda" },
+]
+torchvision = [
   { index = "pytorch-rocm", extra = "rocm" },
   { index = "pytorch-cuda", extra = "cuda" },
 ]

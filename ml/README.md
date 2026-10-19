@@ -72,6 +72,29 @@ vt-ml transcribe --input IN.wav --backend whisper|fake --device cuda|cpu
 - Segments are trimmed to their words' timestamps
 - `fake` makes a segment of `speech` from each stretch louder than -26 dBFS RMS, in 10 ms frames; `VT_ML_FAKE_DELAY_S` slows its progress for cancel tests
 
+### `separate`
+
+```sh
+vt-ml separate --input IN.wav --output-dir DIR --backend sam|tiger|fake --device cuda|cpu
+```
+
+- `--input` is a WAV at the backend's sample rate, in any channel count
+- `DIR/voice.wav` and `DIR/ambience.wav` are always both written, since one pass produces both
+- Both are RF64 float32 with the input's rate, channel count and length
+- Both are removed on any failure, including SIGTERM
+- `progress` counts one step per channel per chunk
+- `done` adds `voice` and `ambience`, the paths written
+
+| Backend | Model                                       | Voice     | Ambience                    |
+| ------- | ------------------------------------------- | --------- | --------------------------- |
+| `sam`   | `facebook/sam-audio-large`, prompt "speech" | Target    | Residual                    |
+| `tiger` | `JusperLee/TIGER-DnR`, dialogue model       | Dialogue  | Effects + music             |
+| `fake`  | None                                        | The input | The input at a quarter gain |
+
+- Mono models get one channel at a time; stereo is re-interleaved
+- Chunks overlap and are crossfaded with complementary sin² ramps; see `chunking.py`
+- TIGER's model code is vendored in `src/vt_ml/separate/vendor/tiger/` (MIT), since upstream isn't a package
+
 ## GPUs
 
 - The `rocm` and `cuda` extras conflict, and each pulls torch from its own PyTorch index

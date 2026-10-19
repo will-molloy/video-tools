@@ -119,7 +119,7 @@ pub async fn run(
         },
         audio: tracks
             .map(|(stream, track)| {
-                let StreamKind::Audio { sample_rate } = stream.kind else {
+                let StreamKind::Audio { sample_rate, .. } = stream.kind else {
                     unreachable!("audio was found by kind");
                 };
                 AudioTrack { track, sample_rate }
@@ -142,7 +142,7 @@ fn estimate_packets(stream: &ffprobe::Stream, duration: Duration) -> u64 {
         StreamKind::Video {
             frame_rate: Some(rate),
         } => rate.num() as f64 / rate.den() as f64,
-        StreamKind::Audio { sample_rate } => {
+        StreamKind::Audio { sample_rate, .. } => {
             f64::from(sample_rate) / f64::from(ESTIMATED_SAMPLES_PER_AUDIO_PACKET)
         }
         _ => 0.0,

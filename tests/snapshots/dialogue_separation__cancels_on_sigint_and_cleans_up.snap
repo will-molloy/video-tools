@@ -1,0 +1,10 @@
+---
+source: tests/dialogue_separation.rs
+expression: "common::render(&output)"
+---
+exit: 130
+
+stdout:
+
+stderr:
+Cancelled.

@@ -1,0 +1,11 @@
+---
+source: tests/dialogue_separation.rs
+expression: "common::render(&output)"
+---
+exit: 0
+
+stdout:
+Kept the ambience in clean-cfr.ambience.mp4.
+Reused the cached separation by the fake backend, made on cpu in [elapsed] s.
+
+stderr:
