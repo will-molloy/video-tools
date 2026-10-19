@@ -33,7 +33,8 @@ use crate::{
     tools::{
         Tool,
         chapters::{self, Outcome},
-        sync_check::{self, Progress, Report, diagnose::Severity, thousands},
+        sync_check::{self, Report, diagnose::Severity, thousands},
+        transcribe,
     },
 };
 
@@ -60,6 +61,13 @@ pub async fn run() -> Result<()> {
 
 type ToolOutput = Vec<Line<'static>>;
 
+/// The latest progress report from whichever tool is running.
+#[derive(Debug, Clone, PartialEq)]
+enum Progress {
+    Scan(sync_check::Progress),
+    Transcription(transcribe::Progress),
+}
+
 /// Tags a tool run, so a result from a cancelled run can't land on a later run's screen.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct RunId(u64);
@@ -74,6 +82,9 @@ struct App {
     screen: Screen,
     next_run: u64,
     results_tx: UnboundedSender<(RunId, ToolOutput)>,
+
+    /// Set by Ctrl-C while a tool runs. The TUI exits once the tool has cleaned up.
+    quitting: bool,
 }
 
 enum Screen {
@@ -87,6 +98,10 @@ enum Screen {
         tool: Tool,
         run: RunId,
         cancel: CancellationToken,
+
+        /// Set once the user cancels. The screen stays until the tool has cleaned up, so a
+        /// subprocess can't outlive its screen.
+        cancelling: bool,
 
         /// Holds the latest report only, so the tool never waits on the UI.
         progress: watch::Receiver<Option<Progress>>,
@@ -117,6 +132,7 @@ impl App {
             screen: Screen::PickFile,
             next_run: 0,
             results_tx,
+            quitting: false,
         }
     }
 
@@ -142,7 +158,11 @@ impl App {
                         return Ok(());
                     }
                 }
-                Some((run, lines)) = results_rx.recv() => self.on_result(run, lines),
+                Some((run, lines)) = results_rx.recv() => {
+                    if self.on_result(run, lines).is_break() {
+                        return Ok(());
+                    }
+                }
                 // Wakes the loop only to redraw progress, and only while a tool runs.
                 _ = redraw.tick(), if matches!(self.screen, Screen::Running { .. }) => {}
             }
@@ -150,10 +170,12 @@ impl App {
     }
 
     fn on_key(&mut self, key: KeyEvent) -> ControlFlow<()> {
-        if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
+        let quit = key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c');
+        if quit && !matches!(self.screen, Screen::Running { .. }) {
             return ControlFlow::Break(());
         }
-        let back = matches!(key.code, KeyCode::Esc | KeyCode::Char('q'));
+        self.quitting |= quit;
+        let back = quit || matches!(key.code, KeyCode::Esc | KeyCode::Char('q'));
 
         // Each arm returns the next screen, or None to stay put. Building the next screen from
         // clones lets the `&mut self.screen` borrow end before the assignment below.
@@ -196,6 +218,7 @@ impl App {
                                 tool,
                                 run,
                                 cancel,
+                                cancelling: false,
                                 progress,
                             })
                         }
@@ -204,12 +227,16 @@ impl App {
                 }
             }
             Screen::Running {
-                file, tool, cancel, ..
-            } => back.then(|| {
-                // The task stops its subprocess and exits on its own; its result is discarded.
-                cancel.cancel();
-                tool_picker(file.clone(), *tool)
-            }),
+                cancel, cancelling, ..
+            } => {
+                // The task stops its subprocesses and cleans up, then its result moves this
+                // screen on.
+                if back {
+                    cancel.cancel();
+                    *cancelling = true;
+                }
+                None
+            }
             Screen::Output {
                 file,
                 tool,
@@ -244,24 +271,32 @@ impl App {
         ControlFlow::Continue(())
     }
 
-    fn on_result(&mut self, run: RunId, lines: ToolOutput) {
-        // Results of cancelled runs still arrive, after the user has left their screen.
+    fn on_result(&mut self, run: RunId, lines: ToolOutput) -> ControlFlow<()> {
         if let Screen::Running {
             file,
             tool,
             run: current,
+            cancelling,
             ..
         } = &self.screen
             && *current == run
         {
-            self.screen = Screen::Output {
-                file: file.clone(),
-                tool: *tool,
-                lines,
-                scroll: 0,
-                viewport: 0,
+            if self.quitting {
+                return ControlFlow::Break(());
+            }
+            self.screen = if *cancelling {
+                tool_picker(file.clone(), *tool)
+            } else {
+                Screen::Output {
+                    file: file.clone(),
+                    tool: *tool,
+                    lines,
+                    scroll: 0,
+                    viewport: 0,
+                }
             };
         }
+        ControlFlow::Continue(())
     }
 
     fn draw(&mut self, frame: &mut Frame) {
@@ -298,10 +333,16 @@ impl App {
                 file,
                 tool,
                 progress,
+                cancelling,
                 ..
             } => {
-                draw_running(frame, body, *tool, file, *progress.borrow());
-                "Esc cancel"
+                let progress = progress.borrow().clone();
+                draw_running(frame, body, *tool, file, progress, *cancelling);
+                if *cancelling {
+                    "Cancelling…"
+                } else {
+                    "Esc cancel"
+                }
             }
             Screen::Output {
                 tool,
@@ -375,10 +416,24 @@ async fn run_tool(
             .map(|o| chapters_lines(file, o)),
         // `send_replace` succeeds even after the UI drops the receiver.
         Tool::SyncCheck => sync_check::run(file, cancel, |p| {
-            progress.send_replace(Some(p));
+            progress.send_replace(Some(Progress::Scan(p)));
         })
         .await
         .map(|report| sync_check_lines(&report)),
+        Tool::Transcribe => {
+            let run = transcribe::run(file, transcribe::Backend::Whisper, false, cancel, |p| {
+                progress.send_replace(Some(Progress::Transcription(p)));
+            });
+            match run.await {
+                Ok(outcome) => Ok(outcome.lines().into_iter().map(Line::from).collect()),
+                Err(e) => match e.downcast::<transcribe::Exists>() {
+                    Ok(exists) => Ok(vec![
+                        Line::from(format!("{exists}. Delete it to transcribe again.")).yellow(),
+                    ]),
+                    Err(e) => Err(e),
+                },
+            }
+        }
     }
 }
 
@@ -515,25 +570,36 @@ fn draw_running(
     tool: Tool,
     file: &Path,
     progress: Option<Progress>,
+    cancelling: bool,
 ) {
     let block = panel(tool.name());
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
-    let [text, _, gauge] = Layout::vertical([
+    let [text, _, status_area] = Layout::vertical([
         Constraint::Length(1),
         Constraint::Length(1),
         Constraint::Length(1),
     ])
     .areas(inner);
-    let status = format!("Running {} on {}…", tool.name(), file_name(file));
+    let verb = if cancelling { "Cancelling" } else { "Running" };
+    let status = format!("{verb} {} on {}…", tool.name(), file_name(file));
     frame.render_widget(Line::from(status), text);
 
-    let Some(Progress { packets, expected }) = progress else {
-        return;
-    };
+    match progress {
+        None => {}
+        Some(Progress::Scan(progress)) => draw_scan_progress(frame, status_area, progress),
+        Some(Progress::Transcription(progress)) => match progress.ratio() {
+            Some(ratio) => frame.render_widget(gauge(ratio, progress.to_string()), status_area),
+            None => frame.render_widget(Line::from(progress.to_string()), status_area),
+        },
+    }
+}
+
+fn draw_scan_progress(frame: &mut Frame, area: Rect, progress: sync_check::Progress) {
+    let sync_check::Progress { packets, expected } = progress;
     let Some(expected) = expected.filter(|&n| n > 0) else {
-        frame.render_widget(Line::from(format!("{} packets", thousands(packets))), gauge);
+        frame.render_widget(Line::from(format!("{} packets", thousands(packets))), area);
         return;
     };
     // The total is an estimate, so hold below 100% until the result replaces this screen.
@@ -545,13 +611,14 @@ fn draw_running(
         thousands(packets),
         thousands(expected)
     );
-    frame.render_widget(
-        Gauge::default()
-            .ratio(ratio)
-            .label(label)
-            .gauge_style(Style::new().fg(Color::Cyan).bg(Color::DarkGray)),
-        gauge,
-    );
+    frame.render_widget(gauge(ratio, label), area);
+}
+
+fn gauge(ratio: f64, label: String) -> Gauge<'static> {
+    Gauge::default()
+        .ratio(ratio)
+        .label(label)
+        .gauge_style(Style::new().fg(Color::Cyan).bg(Color::DarkGray))
 }
 
 fn draw_output(
@@ -621,22 +688,81 @@ fn is_video(path: &Path) -> bool {
 mod tests {
     use super::*;
 
-    #[test]
-    fn ignores_results_from_cancelled_runs() {
+    fn running(tool: Tool, run: RunId, cancel: CancellationToken) -> App {
         let (results_tx, _) = mpsc::unbounded_channel();
         let mut app = App::new(PathBuf::from("/videos"), vec![], results_tx);
         let (_, progress) = watch::channel(None);
         app.screen = Screen::Running {
             file: "/videos/stream.mkv".into(),
-            tool: Tool::SyncCheck,
-            run: RunId(1),
-            cancel: CancellationToken::new(),
+            tool,
+            run,
+            cancel,
+            cancelling: false,
             progress,
         };
+        app
+    }
 
-        app.on_result(RunId(0), vec![Line::from("stale")]);
+    fn key(code: KeyCode, modifiers: KeyModifiers) -> KeyEvent {
+        KeyEvent::new(code, modifiers)
+    }
+
+    #[test]
+    fn ignores_results_from_other_runs() {
+        let mut app = running(Tool::SyncCheck, RunId(1), CancellationToken::new());
+
+        let _ = app.on_result(RunId(0), vec![Line::from("stale")]);
 
         assert!(matches!(app.screen, Screen::Running { run: RunId(1), .. }));
+    }
+
+    #[test]
+    fn esc_cancels_and_waits_for_the_tool_to_clean_up() {
+        let cancel = CancellationToken::new();
+        let mut app = running(Tool::Transcribe, RunId(0), cancel.clone());
+
+        let flow = app.on_key(key(KeyCode::Esc, KeyModifiers::NONE));
+
+        assert!(flow.is_continue());
+        assert!(cancel.is_cancelled());
+        assert!(matches!(
+            app.screen,
+            Screen::Running {
+                cancelling: true,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn returns_to_the_tool_once_a_cancelled_run_finishes() {
+        let mut app = running(Tool::Transcribe, RunId(0), CancellationToken::new());
+        let _ = app.on_key(key(KeyCode::Esc, KeyModifiers::NONE));
+
+        let flow = app.on_result(RunId(0), vec![Line::from("Error: cancelled")]);
+
+        assert!(flow.is_continue());
+        let Screen::PickTool { list, .. } = &app.screen else {
+            panic!("expected the tool picker");
+        };
+        assert_eq!(
+            list.selected().map(|i| Tool::ALL[i]),
+            Some(Tool::Transcribe)
+        );
+    }
+
+    #[test]
+    fn ctrl_c_quits_once_the_running_tool_has_cleaned_up() {
+        let cancel = CancellationToken::new();
+        let mut app = running(Tool::Transcribe, RunId(0), cancel.clone());
+
+        let on_key = app.on_key(key(KeyCode::Char('c'), KeyModifiers::CONTROL));
+        let on_result = app.on_result(RunId(0), vec![Line::from("Error: cancelled")]);
+
+        assert_eq!(
+            (on_key, cancel.is_cancelled(), on_result),
+            (ControlFlow::Continue(()), true, ControlFlow::Break(()))
+        );
     }
 
     #[test]

@@ -20,5 +20,5 @@ tokio-util = "0.7.20"
 
 [dev-dependencies]
 assert_cmd = "2.2.2"
-insta = "1.49.0"
+insta = { version = "1.49.0", features = ["filters"] }
 tempfile = "3.27.0"
