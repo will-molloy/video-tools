@@ -1,40 +1,18 @@
-//! The ffmpeg steps either side of separation.
+//! Writes the kept stem after separation.
 
 use std::{
     ffi::OsString,
     fs,
     path::{Path, PathBuf},
-    process::Stdio,
     time::Duration,
 };
 
 use anyhow::{Context, Result, bail};
-use tokio::process::Command;
 
-use crate::ffprobe::{self, Stream, StreamKind};
-
-/// Decodes `audio` from `input` into a float WAV at `sample_rate`, keeping its channels.
-///
-/// RF64 lifts WAV's 4 GB limit, which float32 stereo passes after about 3 hours at 48 kHz.
-pub async fn extract(input: &Path, audio: &Stream, sample_rate: u32, out: &Path) -> Result<()> {
-    ffmpeg(
-        [
-            "-i".into(),
-            input.into(),
-            "-map".into(),
-            format!("0:{}", audio.index).into(),
-            "-ar".into(),
-            sample_rate.to_string().into(),
-            "-c:a".into(),
-            "pcm_f32le".into(),
-            "-rf64".into(),
-            "auto".into(),
-            out.into(),
-        ],
-        "extract audio",
-    )
-    .await
-}
+use crate::{
+    ffmpeg,
+    ffprobe::{self, Stream, StreamKind},
+};
 
 /// How to write the kept stem.
 #[derive(Debug, Clone, PartialEq)]
@@ -168,7 +146,7 @@ pub async fn write(input: &Path, stem: &Path, output: &Output) -> Result<()> {
         }
     }
     args.push(partial.0.clone().into());
-    ffmpeg(args, "write the output").await?;
+    ffmpeg::run(args, "write the output").await?;
     fs::rename(&partial.0, path).with_context(|| format!("failed to write {}", path.display()))?;
     Ok(())
 }
@@ -191,25 +169,6 @@ impl Drop for Partial {
     fn drop(&mut self) {
         let _ = fs::remove_file(&self.0);
     }
-}
-
-async fn ffmpeg(args: impl IntoIterator<Item = OsString>, what: &str) -> Result<()> {
-    let output = Command::new("ffmpeg")
-        .args(["-nostdin", "-v", "error", "-y"])
-        .args(args)
-        .stdin(Stdio::null())
-        // Cancelling the future kills ffmpeg.
-        .kill_on_drop(true)
-        .output()
-        .await
-        .context("failed to run ffmpeg; is it installed and on PATH?")?;
-    if !output.status.success() {
-        bail!(
-            "ffmpeg failed to {what}: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
-        );
-    }
-    Ok(())
 }
 
 #[cfg(test)]

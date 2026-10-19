@@ -37,7 +37,7 @@ fn hf_home() -> PathBuf {
 }
 
 const FAKE_AMBIENCE_GAIN: f32 = 0.25;
-const FAKE_DELAY_ENV: &str = "DIALOGUE_SEPARATION_FAKE_DELAY_S";
+const FAKE_DELAY_ENV: &str = "VT_ML_FAKE_DELAY_S";
 
 /// A scratch directory holding a copy of a fixture and an empty cache.
 struct Workspace {
