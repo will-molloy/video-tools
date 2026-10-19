@@ -4,7 +4,7 @@ runs:
     - name: Setup Rust
       uses: dtolnay/rust-toolchain@stable
       with:
-        components: clippy, rustfmt
+        components: clippy, rustfmt, llvm-tools-preview
 
     - name: Cache Cargo
       uses: Swatinem/rust-cache@v2

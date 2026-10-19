@@ -1,5 +1,8 @@
 # video-tools
 
+[![build](https://github.com/will-molloy/video-tools/actions/workflows/build.yml/badge.svg?branch=main&event=push)](https://github.com/will-molloy/video-tools/actions/workflows/build.yml)
+[![codecov](https://codecov.io/gh/will-molloy/video-tools/branch/main/graph/badge.svg)](https://codecov.io/gh/will-molloy/video-tools)
+
 `vt` is a TUI and CLI toolbox for video processing.
 It shells out to `ffprobe`/`ffmpeg`, which must be on `PATH`.
 

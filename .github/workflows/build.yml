@@ -31,14 +31,17 @@ jobs:
       - name: Build
         run: cargo build --locked
 
-      - name: Install ffmpeg
-        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ffmpeg
-
-      - name: Check fixtures
-        run: tests/fixtures/gen.sh --check
+      - uses: ./.github/actions/setup-test
 
       - name: Test
-        run: cargo test --locked
+        run: cargo llvm-cov --locked --lcov --output-path lcov.info
+
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@v7
+        with:
+          files: lcov.info
+          fail_ci_if_error: true
+          token: ${{ secrets.CODECOV_TOKEN }}
 
   release:
     needs: [ build ]
