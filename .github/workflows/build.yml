@@ -20,28 +20,10 @@ jobs:
       contents: read
     steps:
       - uses: actions/checkout@v7
-      - uses: ./.github/actions/setup-rust
-
-      - name: Check formatting
-        run: cargo fmt --check
-
-      - name: Lint
-        run: cargo clippy --all-targets --locked -- -D warnings
-
-      - name: Build
-        run: cargo build --locked
-
-      - uses: ./.github/actions/setup-test
-
-      - name: Test
-        run: cargo llvm-cov --locked --lcov --output-path lcov.info
-
-      - name: Upload coverage to Codecov
-        uses: codecov/codecov-action@v7
+      - uses: ./.github/actions/build-ml
+      - uses: ./.github/actions/build-tui
         with:
-          files: lcov.info
-          fail_ci_if_error: true
-          token: ${{ secrets.CODECOV_TOKEN }}
+          codecov-token: ${{ secrets.CODECOV_TOKEN }}
 
   release:
     needs: [ build ]
