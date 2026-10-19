@@ -1,0 +1,11 @@
+---
+source: tests/sync_check.rs
+expression: "sync_check(&[fixture])"
+---
+exit: 1
+
+Scanned the whole file.
+Video #0: h264, 60 fps, 600 frames, 0:00.000 to 0:09.999
+Audio #1: aac, 48000 Hz, 469 packets, 0:00.000 to 0:10.005
+
+minor: video #0 frame intervals vary from 15.7 ms to 17.3 ms (599 of 599 off nominal), drifting up to 0.7 ms from constant-rate positions. Fix: retime video to a constant frame rate (no re-encode).

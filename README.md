@@ -26,6 +26,9 @@ vt chapters FILE  # print a YouTube description chapter list
 vt sync-check FILE [--full] [--json]  # diagnose audio/video sync problems
 ```
 
+`sync-check` samples the first 10 minutes and last 30 seconds unless `--full` is given.
+It exits 0 when clean, 1 when it finds problems, and 2 on error.
+
 ## Development
 
 ```sh
@@ -33,6 +36,10 @@ cargo fmt
 cargo clippy --all-targets
 cargo test
 ```
+
+Tests need `ffprobe` on `PATH`.
+`tests/fixtures/gen.sh` regenerates the media fixtures with `ffmpeg` and checks each has its intended defect; `--check` only checks.
+Review snapshot changes with [`cargo insta`](https://insta.rs).
 
 Commits and PR titles follow [Conventional Commits](https://www.conventionalcommits.org).
 Merges to `main` tag a release, with the version bump derived from those commits.

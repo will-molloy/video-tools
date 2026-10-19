@@ -1,0 +1,46 @@
+---
+source: tests/sync_check.rs
+expression: "sync_check(&[\"--json\", fixture])"
+---
+exit: 1
+
+{
+  "scope": {
+    "mode": "full"
+  },
+  "video": {
+    "index": 0,
+    "codec": "h264",
+    "frame_rate": "60/1",
+    "packets": 600,
+    "span": {
+      "start": 0.0,
+      "end": 9.999333333
+    }
+  },
+  "audio": [
+    {
+      "index": 1,
+      "codec": "aac",
+      "sample_rate": 48000,
+      "packets": 469,
+      "span": {
+        "start": 0.0,
+        "end": 10.005333333
+      }
+    }
+  ],
+  "findings": [
+    {
+      "stream": 0,
+      "severity": "minor",
+      "action": "retime_to_cfr",
+      "kind": "variable_frame_rate",
+      "intervals": 599,
+      "irregular": 599,
+      "shortest": 0.015666667,
+      "longest": 0.017333333,
+      "max_drift": 0.000666667
+    }
+  ]
+}
