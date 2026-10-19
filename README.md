@@ -23,10 +23,10 @@ cargo uninstall video-tools
 ```sh
 vt                # open the TUI in the current directory
 vt chapters FILE  # print a YouTube description chapter list
-vt sync-check FILE [--full] [--json]  # diagnose audio/video sync problems
+vt sync-check FILE [--json]  # diagnose audio/video sync problems
 ```
 
-`sync-check` samples the first 10 minutes and last 30 seconds unless `--full` is given.
+`sync-check` reads every packet in the file.
 It exits 0 when clean, 1 when it finds problems, and 2 on error.
 
 ## Development

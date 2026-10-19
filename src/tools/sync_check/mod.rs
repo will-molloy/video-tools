@@ -9,14 +9,8 @@ use clap::Args;
 use serde::{Serialize, Serializer};
 use tokio_util::sync::CancellationToken;
 
-use crate::ffprobe::{self, Ratio, ReadInterval, StreamKind};
-use diagnose::{AudioTrack, Finding, Nanos, Packet, Probe, Segment, Span, Track, VideoTrack};
-
-/// The default scan reads this much from the start of the file...
-pub const SAMPLE_HEAD: Duration = Duration::from_secs(10 * 60);
-
-/// ...and this much from the end, to find where each stream stops.
-pub const SAMPLE_TAIL: Duration = Duration::from_secs(30);
+use crate::ffprobe::{self, Ratio, StreamKind};
+use diagnose::{AudioTrack, Finding, Nanos, Packet, Probe, Span, Track, VideoTrack};
 
 /// Estimates audio packets per second for the progress bar when the container doesn't count
 /// them. This is AAC's frame size.
@@ -30,10 +24,6 @@ pub struct SyncCheckArgs {
     /// Video file to check
     file: PathBuf,
 
-    /// Scan the whole file instead of its first 10 minutes and last 30 seconds
-    #[arg(long)]
-    full: bool,
-
     /// Print the report as JSON
     #[arg(long)]
     json: bool,
@@ -41,15 +31,12 @@ pub struct SyncCheckArgs {
 
 /// Exits 0 when clean and 1 when there are findings. Errors exit 2 from `main`.
 pub async fn cli(args: &SyncCheckArgs) -> Result<ExitCode> {
-    let report = run(&args.file, args.full, &CancellationToken::new(), |_| {}).await?;
+    let report = run(&args.file, &CancellationToken::new(), |_| {}).await?;
     if args.json {
         println!("{}", serde_json::to_string_pretty(&report)?);
     } else {
         for line in report.header() {
             println!("{line}");
-        }
-        if matches!(report.scope, Scope::Sampled { .. }) {
-            println!("Pass --full to scan the whole file.");
         }
         println!();
         if report.findings.is_empty() {
@@ -76,10 +63,9 @@ pub struct Progress {
     pub expected: Option<u64>,
 }
 
-/// Probes `path` and diagnoses it, sampling unless `full` is set.
+/// Scans every packet in `path` and diagnoses it.
 pub async fn run(
     path: &Path,
-    full: bool,
     cancel: &CancellationToken,
     mut on_progress: impl FnMut(Progress),
 ) -> Result<Report> {
@@ -98,45 +84,38 @@ pub async fn run(
         .chain(audio.iter().copied())
         .collect();
 
-    let scope = Scope::new(full, info.duration);
-    let intervals = scope.intervals(info.duration);
-    let expected = info.duration.map(|duration| {
-        intervals
-            .iter()
-            .map(|&i| estimate_packets(&tracked, duration, interval_length(i, duration)))
-            .sum()
-    });
-
-    let mut segments = vec![Vec::new(); tracked.len()];
+    let expected = info
+        .duration
+        .map(|duration| tracked.iter().map(|s| estimate_packets(s, duration)).sum());
+    let mut collected = vec![Vec::new(); tracked.len()];
     let mut packets: u64 = 0;
-    for &interval in &intervals {
-        let mut current = vec![Vec::new(); tracked.len()];
-        ffprobe::packets(path, interval, cancel, |packet| {
-            let Some(i) = tracked.iter().position(|s| s.index == packet.stream) else {
-                return;
-            };
-            packets += 1;
-            if packets.is_multiple_of(PROGRESS_EVERY) {
-                on_progress(Progress { packets, expected });
-            }
-            if !packet.discard {
-                current[i].push(Packet {
-                    pts: packet.pts,
-                    duration: packet.duration,
-                });
-            }
-        })
-        .await?;
-        for (track, packets) in segments.iter_mut().zip(current) {
-            track.push(Segment::new(packets));
+    ffprobe::packets(path, cancel, |packet| {
+        let Some(i) = tracked.iter().position(|s| s.index == packet.stream) else {
+            return;
+        };
+        packets += 1;
+        if packets.is_multiple_of(PROGRESS_EVERY) {
+            on_progress(Progress { packets, expected });
         }
-    }
+        if !packet.discard {
+            collected[i].push(Packet {
+                pts: packet.pts,
+                duration: packet.duration,
+            });
+        }
+    })
+    .await?;
 
     // `tracked` lists the video stream first, then the audio streams in order.
-    let mut tracks = tracked
-        .iter()
-        .zip(segments)
-        .map(|(stream, segments)| (*stream, track(stream, segments)));
+    let mut tracks = tracked.iter().zip(collected).map(|(stream, packets)| {
+        let track = Track::new(
+            stream.index,
+            stream.codec.clone(),
+            stream.time_base,
+            packets,
+        );
+        (*stream, track)
+    });
     let (_, video_track) = tracks.next().context("video stream not tracked")?;
     let StreamKind::Video { frame_rate } = video.kind else {
         unreachable!("video was found by kind");
@@ -156,96 +135,34 @@ pub async fn run(
             })
             .collect(),
     };
-    Ok(Report::new(scope, &probe))
+    Ok(Report::new(&probe))
 }
 
-fn track(stream: &ffprobe::Stream, segments: Vec<Segment>) -> Track {
-    Track {
-        index: stream.index,
-        codec: stream.codec.clone(),
-        time_base: stream.time_base,
-        segments,
-    }
-}
-
-fn interval_length(interval: ReadInterval, duration: Duration) -> Duration {
-    match interval {
-        ReadInterval::Whole => duration,
-        ReadInterval::Head(length) => length.min(duration),
-        ReadInterval::From(start) => duration.saturating_sub(start),
-    }
-}
-
-/// Estimates how many packets the tracked streams have in `length` of a file lasting
-/// `duration`. Progress-bar precision is all this needs, so it uses floats.
+/// Estimates a stream's packet count in a file lasting `duration`: exact when the container
+/// indexes packets, otherwise from the stream's rate. Progress-bar precision is all this needs,
+/// so the fallback uses floats.
 #[allow(
     clippy::cast_precision_loss,
     clippy::cast_possible_truncation,
     clippy::cast_sign_loss
 )]
-fn estimate_packets(streams: &[&ffprobe::Stream], duration: Duration, length: Duration) -> u64 {
-    let per_sec = |stream: &ffprobe::Stream| match (stream.packet_count, &stream.kind) {
-        (Some(count), _) if !duration.is_zero() => count as f64 / duration.as_secs_f64(),
-        (
-            _,
-            StreamKind::Video {
-                frame_rate: Some(rate),
-            },
-        ) => rate.num() as f64 / rate.den() as f64,
-        (_, StreamKind::Audio { sample_rate }) => {
-            f64::from(*sample_rate) / f64::from(ESTIMATED_SAMPLES_PER_AUDIO_PACKET)
+fn estimate_packets(stream: &ffprobe::Stream, duration: Duration) -> u64 {
+    let per_sec = match stream.kind {
+        StreamKind::Video {
+            frame_rate: Some(rate),
+        } => rate.num() as f64 / rate.den() as f64,
+        StreamKind::Audio { sample_rate } => {
+            f64::from(sample_rate) / f64::from(ESTIMATED_SAMPLES_PER_AUDIO_PACKET)
         }
         _ => 0.0,
     };
-    streams
-        .iter()
-        .map(|stream| (per_sec(stream) * length.as_secs_f64()) as u64)
-        .sum()
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(tag = "mode", rename_all = "snake_case")]
-pub enum Scope {
-    Full,
-    Sampled {
-        #[serde(serialize_with = "seconds")]
-        head: Duration,
-        #[serde(serialize_with = "seconds")]
-        tail: Duration,
-    },
-}
-
-impl Scope {
-    /// Samples unless `full` is set, the duration is unknown, or the samples would cover the
-    /// whole file anyway.
-    fn new(full: bool, duration: Option<Duration>) -> Self {
-        match duration {
-            Some(duration) if !full && duration > SAMPLE_HEAD + SAMPLE_TAIL => Scope::Sampled {
-                head: SAMPLE_HEAD,
-                tail: SAMPLE_TAIL,
-            },
-            _ => Scope::Full,
-        }
-    }
-
-    fn intervals(self, duration: Option<Duration>) -> Vec<ReadInterval> {
-        match (self, duration) {
-            (Scope::Sampled { head, tail }, Some(duration)) => vec![
-                ReadInterval::Head(head),
-                ReadInterval::From(duration.saturating_sub(tail)),
-            ],
-            _ => vec![ReadInterval::Whole],
-        }
-    }
-}
-
-fn seconds<S: Serializer>(duration: &Duration, serializer: S) -> Result<S::Ok, S::Error> {
-    serializer.serialize_f64(duration.as_secs_f64())
+    stream
+        .packet_count
+        .unwrap_or((per_sec * duration.as_secs_f64()) as u64)
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct Report {
-    pub scope: Scope,
     pub video: VideoSummary,
     pub audio: Vec<AudioSummary>,
     pub findings: Vec<Finding>,
@@ -275,10 +192,9 @@ fn ratio<S: Serializer>(ratio: &Ratio, serializer: S) -> Result<S::Ok, S::Error>
 }
 
 impl Report {
-    pub fn new(scope: Scope, probe: &Probe) -> Self {
+    pub fn new(probe: &Probe) -> Self {
         let video = &probe.video;
         Report {
-            scope,
             video: VideoSummary {
                 index: video.track.index,
                 codec: video.track.codec.clone(),
@@ -301,28 +217,17 @@ impl Report {
         }
     }
 
-    /// The scan scope and one line per stream.
+    /// One line per stream.
     pub fn header(&self) -> Vec<String> {
-        let scope = match self.scope {
-            Scope::Full => "Scanned the whole file.".to_string(),
-            Scope::Sampled { head, tail } => format!(
-                "Scanned the first {} and last {} only.",
-                clock(head),
-                clock(tail)
-            ),
-        };
         let video = &self.video;
-        let mut lines = vec![
-            scope,
-            format!(
-                "Video #{}: {}, {} fps, {} frames{}",
-                video.index,
-                video.codec,
-                fps(video.frame_rate),
-                thousands(video.packets),
-                span(video.span)
-            ),
-        ];
+        let mut lines = vec![format!(
+            "Video #{}: {}, {} fps, {} frames{}",
+            video.index,
+            video.codec,
+            fps(video.frame_rate),
+            thousands(video.packets),
+            span(video.span)
+        )];
         lines.extend(self.audio.iter().map(|audio| {
             format!(
                 "Audio #{}: {}, {} Hz, {} packets{}",
@@ -352,12 +257,6 @@ fn span(span: Option<Span>) -> String {
     span.map_or_else(String::new, |s| {
         format!(", {} to {}", timestamp(s.start), timestamp(s.end))
     })
-}
-
-/// `M:SS` for whole durations such as the sample lengths.
-fn clock(duration: Duration) -> String {
-    let secs = duration.as_secs();
-    format!("{}:{:02}", secs / 60, secs % 60)
 }
 
 /// `[-][H:]M:SS.mmm`, rounded to the millisecond.
@@ -397,39 +296,6 @@ mod tests {
         assert_eq!(thousands(999), "999");
         assert_eq!(thousands(1000), "1,000");
         assert_eq!(thousands(1_234_567), "1,234,567");
-    }
-
-    #[test]
-    fn samples_files_longer_than_head_and_tail() {
-        let longer = SAMPLE_HEAD + SAMPLE_TAIL + Duration::from_millis(1);
-
-        assert_eq!(
-            Scope::new(false, Some(longer)),
-            Scope::Sampled {
-                head: SAMPLE_HEAD,
-                tail: SAMPLE_TAIL,
-            }
-        );
-        assert_eq!(
-            Scope::new(false, Some(longer)).intervals(Some(longer)),
-            vec![
-                ReadInterval::Head(SAMPLE_HEAD),
-                ReadInterval::From(SAMPLE_HEAD + Duration::from_millis(1)),
-            ]
-        );
-    }
-
-    #[test]
-    fn scans_whole_file_when_full_short_or_of_unknown_length() {
-        let long = Duration::from_secs(3600);
-
-        assert_eq!(Scope::new(true, Some(long)), Scope::Full);
-        assert_eq!(
-            Scope::new(false, Some(SAMPLE_HEAD + SAMPLE_TAIL)),
-            Scope::Full
-        );
-        assert_eq!(Scope::new(false, None), Scope::Full);
-        assert_eq!(Scope::Full.intervals(Some(long)), vec![ReadInterval::Whole]);
     }
 
     #[test]

@@ -374,7 +374,7 @@ async fn run_tool(
             .ok_or(Cancelled)?
             .map(|o| chapters_lines(file, o)),
         // `send_replace` succeeds even after the UI drops the receiver.
-        Tool::SyncCheck => sync_check::run(file, false, cancel, |p| {
+        Tool::SyncCheck => sync_check::run(file, cancel, |p| {
             progress.send_replace(Some(p));
         })
         .await
@@ -626,7 +626,7 @@ mod tests {
     use crate::{
         ffprobe::Ratio,
         tools::sync_check::{
-            AudioSummary, Scope, VideoSummary,
+            AudioSummary, VideoSummary,
             diagnose::{Action, Finding, FindingKind, Nanos, Span},
         },
     };
@@ -650,32 +650,29 @@ mod tests {
     #[test]
     fn renders_sync_check_results() {
         let report = Report {
-            scope: Scope::Sampled {
-                head: sync_check::SAMPLE_HEAD,
-                tail: sync_check::SAMPLE_TAIL,
-            },
             video: VideoSummary {
                 index: 0,
                 codec: "av1".into(),
                 frame_rate: Ratio::new(60, 1).unwrap(),
-                packets: 37_799,
+                packets: 269_999,
                 span: span(0, 4_500_000),
             },
             audio: vec![AudioSummary {
                 index: 1,
                 codec: "aac".into(),
                 sample_rate: 48_000,
-                packets: 29_447,
+                packets: 210_853,
                 span: span(0, 4_498_200),
             }],
             findings: vec![
                 Finding {
-                    stream: 1,
+                    stream: 0,
                     severity: Severity::Minor,
-                    action: Action::FillAudioGaps,
-                    kind: FindingKind::AudioGaps {
-                        count: 1,
-                        total: Nanos::from_millis(32),
+                    action: Action::None,
+                    kind: FindingKind::DroppedFrames {
+                        events: 1,
+                        frames: 1,
+                        missing: Nanos::from_millis(17),
                     },
                 },
                 Finding {

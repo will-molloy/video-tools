@@ -157,28 +157,6 @@ pub struct Packet {
     pub discard: bool,
 }
 
-/// The part of the file a packet scan reads.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ReadInterval {
-    Whole,
-
-    /// From the start of the file for this long.
-    Head(Duration),
-
-    /// From this timestamp to the end of the file. ffprobe seeks to the keyframe at or before it.
-    From(Duration),
-}
-
-impl ReadInterval {
-    fn ffprobe_arg(self) -> Option<String> {
-        match self {
-            ReadInterval::Whole => None,
-            ReadInterval::Head(length) => Some(format!("%+{:.3}", length.as_secs_f64())),
-            ReadInterval::From(start) => Some(format!("{:.3}%", start.as_secs_f64())),
-        }
-    }
-}
-
 /// Returned by [`packets`] when the scan is cancelled.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Cancelled;
@@ -191,26 +169,18 @@ impl fmt::Display for Cancelled {
 
 impl std::error::Error for Cancelled {}
 
-/// Streams every packet in `interval` to `on_packet`, one ffprobe output line at a time, so
-/// memory stays flat however large the file is.
+/// Streams every packet in the file to `on_packet`, one ffprobe output line at a time, so
+/// ffprobe's output is never buffered whole.
 ///
 /// Cancelling `cancel` kills ffprobe, waits for it to exit, and returns [`Cancelled`].
 pub async fn packets(
     path: &Path,
-    interval: ReadInterval,
     cancel: &CancellationToken,
     mut on_packet: impl FnMut(Packet),
 ) -> Result<()> {
     let mut child = Command::new("ffprobe")
         .args(["-v", "error", "-of", "compact=p=0"])
         .args(["-show_entries", "packet=stream_index,pts,duration,flags"])
-        .args(
-            interval
-                .ffprobe_arg()
-                .map(|arg| ["-read_intervals".to_string(), arg])
-                .into_iter()
-                .flatten(),
-        )
         .arg("-i")
         .arg(path)
         .stdin(Stdio::null())
@@ -581,19 +551,6 @@ mod tests {
         assert_eq!(
             parse_packet("stream_index=0|pts=N/A|duration=1500|flags=K__").unwrap(),
             None
-        );
-    }
-
-    #[test]
-    fn formats_read_intervals() {
-        assert_eq!(ReadInterval::Whole.ffprobe_arg(), None);
-        assert_eq!(
-            ReadInterval::Head(Duration::from_secs(600)).ffprobe_arg(),
-            Some("%+600.000".into())
-        );
-        assert_eq!(
-            ReadInterval::From(Duration::from_millis(4_470_500)).ffprobe_arg(),
-            Some("4470.500%".into())
         );
     }
 

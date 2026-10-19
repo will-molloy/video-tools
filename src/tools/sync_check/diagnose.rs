@@ -53,7 +53,7 @@ impl Factor {
     }
 }
 
-/// What the probe found, with each stream's packets grouped by scanned interval.
+/// What a scan of the whole file found.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Probe {
     pub video: VideoTrack,
@@ -72,20 +72,12 @@ pub struct AudioTrack {
     pub sample_rate: u32,
 }
 
+/// One stream's packets, in presentation order.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Track {
     pub index: usize,
     pub codec: String,
     pub time_base: Ratio,
-
-    /// One per scanned interval. Intervals aren't contiguous, so no packet interval is measured
-    /// across two segments.
-    pub segments: Vec<Segment>,
-}
-
-/// Packets from one contiguous read, in presentation order.
-#[derive(Debug, Clone, PartialEq)]
-pub struct Segment {
     packets: Vec<Packet>,
 }
 
@@ -95,31 +87,26 @@ pub struct Packet {
     pub duration: Option<i64>,
 }
 
-impl Segment {
+impl Track {
     /// Sorts by `pts`, because B-frames make video decode order differ from presentation order.
-    pub fn new(mut packets: Vec<Packet>) -> Self {
+    pub fn new(index: usize, codec: String, time_base: Ratio, mut packets: Vec<Packet>) -> Self {
         packets.sort_unstable_by_key(|p| p.pts);
-        Segment { packets }
+        Track {
+            index,
+            codec,
+            time_base,
+            packets,
+        }
+    }
+
+    pub fn packet_count(&self) -> usize {
+        self.packets.len()
     }
 
     fn intervals(&self) -> impl Iterator<Item = i64> + '_ {
         self.packets
             .windows(2)
             .map(|pair| pair[1].pts - pair[0].pts)
-    }
-}
-
-impl Track {
-    pub fn packet_count(&self) -> usize {
-        self.segments.iter().map(|s| s.packets.len()).sum()
-    }
-
-    fn first(&self) -> Option<&Packet> {
-        self.segments.iter().find_map(|s| s.packets.first())
-    }
-
-    fn last(&self) -> Option<&Packet> {
-        self.segments.iter().rev().find_map(|s| s.packets.last())
     }
 
     fn nanos(&self, ticks: i64) -> Nanos {
@@ -129,9 +116,9 @@ impl Track {
     /// Presentation start and end, the end being the last packet's pts plus a final duration of
     /// `num / den` ticks. Adds in ticks so the end rounds once.
     fn span(&self, (num, den): (i128, i128)) -> Option<Span> {
-        let end = i128::from(self.last()?.pts) * den + num;
+        let end = i128::from(self.packets.last()?.pts) * den + num;
         Some(Span {
-            start: self.nanos(self.first()?.pts),
+            start: self.nanos(self.packets.first()?.pts),
             end: Nanos::from_scaled_ticks(end, den, self.time_base),
         })
     }
@@ -174,13 +161,9 @@ impl AudioTrack {
     /// intervals between them when the container doesn't store durations. ffprobe doesn't report
     /// the codec frame size, so this stands in for `frame_size / sample_rate`.
     fn frame_ticks(&self) -> i64 {
-        let segments = &self.track.segments;
-        let durations = segments
-            .iter()
-            .flat_map(|s| &s.packets)
-            .filter_map(|p| p.duration);
-        median(durations.collect())
-            .or_else(|| median(segments.iter().flat_map(Segment::intervals).collect()))
+        let track = &self.track;
+        median(track.packets.iter().filter_map(|p| p.duration).collect())
+            .or_else(|| median(track.intervals().collect()))
             .unwrap_or(0)
     }
 
@@ -309,8 +292,25 @@ pub enum Action {
     FillAudioGaps,
     /// Resample audio to the video's length, which corrects clock drift.
     StretchAudio,
-    /// No automatic fix applies.
+    /// The desync is imperceptible, so no fix is worth its cost.
     None,
+    /// No automatic fix exists.
+    Unsupported,
+}
+
+impl Action {
+    /// Whether to recommend this for a [`Severity::Minor`] finding. Costly fixes aren't worth
+    /// making for imperceptible desync.
+    fn applies_when_minor(self) -> bool {
+        match self {
+            Action::RetimeToCfr | Action::None | Action::Unsupported => true,
+            Action::ReencodeCfr
+            | Action::PadAudioStart
+            | Action::TrimAudioStart
+            | Action::FillAudioGaps
+            | Action::StretchAudio => false,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -426,16 +426,22 @@ pub fn diagnose(probe: &Probe) -> Vec<Finding> {
 }
 
 impl Finding {
-    /// Grades severity by `desync`, the sync error the defect causes.
-    fn new(stream: usize, desync: Nanos, action: Action, kind: FindingKind) -> Self {
+    /// Grades severity by `desync`, the sync error the defect causes, and keeps `fix` only if
+    /// it's worth making at that severity.
+    fn new(stream: usize, desync: Nanos, fix: Action, kind: FindingKind) -> Self {
+        let severity = if desync.abs() >= PERCEPTIBLE {
+            Severity::Major
+        } else {
+            Severity::Minor
+        };
         Finding {
             stream,
-            severity: if desync.abs() >= PERCEPTIBLE {
-                Severity::Major
+            severity,
+            action: if severity == Severity::Major || fix.applies_when_minor() {
+                fix
             } else {
-                Severity::Minor
+                Action::None
             },
-            action,
             kind,
         }
     }
@@ -444,7 +450,7 @@ impl Finding {
         Finding {
             stream,
             severity: Severity::Major,
-            action: Action::None,
+            action: Action::Unsupported,
             kind: FindingKind::EmptyStream { media },
         }
     }
@@ -461,13 +467,11 @@ fn video_findings(video: &VideoTrack) -> Vec<Finding> {
     let mut max_drift = 0;
     let (mut drops, mut dropped_frames, mut missing) = (0, 0, 0);
 
-    for segment in &video.track.segments {
-        let Some(first) = segment.packets.first() else {
-            continue;
-        };
+    let packets = &video.track.packets;
+    if let Some(first) = packets.first() {
         // Where a constant-rate editor would place the current frame, in frames from `first`.
         let mut slot: i128 = 0;
-        for (packet, interval) in segment.packets[1..].iter().zip(segment.intervals()) {
+        for (packet, interval) in packets[1..].iter().zip(video.track.intervals()) {
             let interval = i128::from(interval) * scale;
             intervals += 1;
             slot += 1;
@@ -534,9 +538,7 @@ fn audio_gaps(audio: &AudioTrack) -> (usize, Nanos) {
     let frame = i128::from(audio.frame_ticks());
     let (count, total) = audio
         .track
-        .segments
-        .iter()
-        .flat_map(Segment::intervals)
+        .intervals()
         .map(i128::from)
         .filter(|&interval| interval * GAP_FACTOR.den > frame * GAP_FACTOR.num)
         .fold((0, 0), |(count, total), interval| {
@@ -569,7 +571,8 @@ impl fmt::Display for Action {
                 "stretch audio to the video's length if it drifts out of sync toward the end; \
                  a truncated tail needs no fix"
             }
-            Action::None => "none available",
+            Action::None => "none needed, the desync is imperceptible",
+            Action::Unsupported => "none available",
         })
     }
 }
@@ -662,50 +665,35 @@ mod tests {
         slots.map(|slot| slot * AAC).collect()
     }
 
-    fn track(
-        index: usize,
-        time_base: Ratio,
-        segments: Vec<Vec<i64>>,
-        duration: Option<i64>,
-    ) -> Track {
-        Track {
-            index,
-            codec: "test".into(),
-            time_base,
-            segments: segments
-                .into_iter()
-                .map(|pts| {
-                    Segment::new(
-                        pts.into_iter()
-                            .map(|pts| Packet { pts, duration })
-                            .collect(),
-                    )
-                })
-                .collect(),
-        }
+    fn track(index: usize, time_base: Ratio, pts: Vec<i64>, duration: Option<i64>) -> Track {
+        let packets = pts
+            .into_iter()
+            .map(|pts| Packet { pts, duration })
+            .collect();
+        Track::new(index, "test".into(), time_base, packets)
     }
 
-    fn video(segments: Vec<Vec<i64>>) -> VideoTrack {
+    fn video(pts: Vec<i64>) -> VideoTrack {
         VideoTrack {
-            track: track(0, ratio(1, 90_000), segments, Some(FRAME)),
+            track: track(0, ratio(1, 90_000), pts, Some(FRAME)),
             frame_rate: ratio(60, 1),
         }
     }
 
-    fn audio(index: usize, segments: Vec<Vec<i64>>) -> AudioTrack {
+    fn audio(index: usize, pts: Vec<i64>) -> AudioTrack {
         AudioTrack {
-            track: track(index, ratio(1, 48_000), segments, Some(AAC)),
+            track: track(index, ratio(1, 48_000), pts, Some(AAC)),
             sample_rate: 48_000,
         }
     }
 
     /// Ten seconds of video, and audio that matches it to within the final packet.
     fn clean_video() -> VideoTrack {
-        video(vec![frames(0..600)])
+        video(frames(0..600))
     }
 
     fn clean_audio(index: usize) -> AudioTrack {
-        audio(index, vec![aac(0..469)])
+        audio(index, aac(0..469))
     }
 
     fn diagnose_streams(video: VideoTrack, audio: Vec<AudioTrack>) -> Vec<Finding> {
@@ -725,7 +713,7 @@ mod tests {
         // 60 fps in Matroska's 1/1000 time base: intervals of 16 and 17 ticks.
         let pts = (0..600).map(|slot| (slot * 1000 + 30) / 60).collect();
         let video = VideoTrack {
-            track: track(0, ratio(1, 1000), vec![pts], None),
+            track: track(0, ratio(1, 1000), pts, None),
             frame_rate: ratio(60, 1),
         };
 
@@ -736,7 +724,7 @@ mod tests {
     fn reorders_b_frame_packets_before_measuring() {
         let decode_order = vec![0, 4500, 1500, 3000, 9000, 6000, 7500];
 
-        assert_eq!(diagnose_streams(video(vec![decode_order]), vec![]), vec![]);
+        assert_eq!(diagnose_streams(video(decode_order), vec![]), vec![]);
     }
 
     #[test]
@@ -745,7 +733,7 @@ mod tests {
         let pts = vec![0, 1545, 2955, 4500, 6045, 7455, 9000];
 
         assert_eq!(
-            diagnose_streams(video(vec![pts]), vec![]),
+            diagnose_streams(video(pts), vec![]),
             vec![Finding {
                 stream: 0,
                 severity: Severity::Minor,
@@ -768,7 +756,7 @@ mod tests {
         let pts = (0..200).map(|slot| slot * 1525).collect();
 
         assert_eq!(
-            diagnose_streams(video(vec![pts]), vec![]),
+            diagnose_streams(video(pts), vec![]),
             vec![Finding {
                 stream: 0,
                 severity: Severity::Major,
@@ -790,7 +778,7 @@ mod tests {
         let pts = vec![0, 1500, 3000, 6000, 7500, 12000, 13500];
 
         assert_eq!(
-            diagnose_streams(video(vec![pts]), vec![]),
+            diagnose_streams(video(pts), vec![]),
             vec![Finding {
                 stream: 0,
                 severity: Severity::Major,
@@ -806,7 +794,7 @@ mod tests {
 
     #[test]
     fn grades_dropped_frames_by_perceptible_desync() {
-        let dropping = |interval| video(vec![vec![0, interval, interval + FRAME]]);
+        let dropping = |interval| video(vec![0, interval, interval + FRAME]);
         let severity = |interval| diagnose_streams(dropping(interval), vec![])[0].severity;
 
         // An interval of 5550 ticks loses 4050 ticks, exactly 45 ms.
@@ -815,17 +803,18 @@ mod tests {
     }
 
     #[test]
-    fn jitter_with_drops_reencodes_and_discounts_drops_from_drift() {
-        // Slot 3 is dropped. The others sit up to 45 ticks off their slots.
+    fn imperceptible_jitter_with_drops_needs_no_fix() {
+        // Slot 3 is dropped, which rules out retiming. The others sit up to 45 ticks off their
+        // slots; drift discounts the drop.
         let pts = vec![0, 1545, 2955, 6000, 7545];
 
         assert_eq!(
-            diagnose_streams(video(vec![pts]), vec![]),
+            diagnose_streams(video(pts), vec![]),
             vec![
                 Finding {
                     stream: 0,
                     severity: Severity::Minor,
-                    action: Action::ReencodeCfr,
+                    action: Action::None,
                     kind: FindingKind::VariableFrameRate {
                         intervals: 4,
                         irregular: 3,
@@ -837,7 +826,7 @@ mod tests {
                 Finding {
                     stream: 0,
                     severity: Severity::Minor,
-                    action: Action::ReencodeCfr,
+                    action: Action::None,
                     kind: FindingKind::DroppedFrames {
                         events: 1,
                         frames: 1,
@@ -850,10 +839,7 @@ mod tests {
 
     #[test]
     fn late_audio_start_pads() {
-        let late = audio(
-            1,
-            vec![aac(0..469).into_iter().map(|t| t + 24_000).collect()],
-        );
+        let late = audio(1, aac(0..469).into_iter().map(|t| t + 24_000).collect());
 
         assert_eq!(
             diagnose_streams(clean_video(), vec![late]),
@@ -870,10 +856,7 @@ mod tests {
 
     #[test]
     fn early_audio_start_trims() {
-        let early = audio(
-            1,
-            vec![aac(0..469).into_iter().map(|t| t - 24_000).collect()],
-        );
+        let early = audio(1, aac(0..469).into_iter().map(|t| t - 24_000).collect());
 
         assert_eq!(
             diagnose_streams(clean_video(), vec![early]),
@@ -890,10 +873,11 @@ mod tests {
 
     #[test]
     fn ignores_audio_offsets_under_two_audio_packets() {
-        // The floor is two AAC packets (2048 ticks, 42.7 ms), longer than one video frame.
+        // The floor is two AAC packets (2048 ticks, 42.7 ms), longer than one video frame. Just
+        // over it, the offset is reported but imperceptible, so it needs no fix.
         let shifted = |offset| {
             let pts = aac(0..469).into_iter().map(|t| t + offset).collect();
-            diagnose_streams(clean_video(), vec![audio(1, vec![pts])])
+            diagnose_streams(clean_video(), vec![audio(1, pts)])
         };
 
         assert_eq!(shifted(2047), vec![]);
@@ -902,7 +886,7 @@ mod tests {
             vec![Finding {
                 stream: 1,
                 severity: Severity::Minor,
-                action: Action::PadAudioStart,
+                action: Action::None,
                 kind: FindingKind::AudioStartOffset {
                     offset: Nanos(42_666_667),
                 },
@@ -916,7 +900,7 @@ mod tests {
         let pts = aac(0..200).into_iter().chain(aac(224..469)).collect();
 
         assert_eq!(
-            diagnose_streams(clean_video(), vec![audio(1, vec![pts])]),
+            diagnose_streams(clean_video(), vec![audio(1, pts)]),
             vec![Finding {
                 stream: 1,
                 severity: Severity::Major,
@@ -933,7 +917,7 @@ mod tests {
     fn measures_gaps_from_intervals_when_packets_lack_durations() {
         let pts = aac(0..200).into_iter().chain(aac(224..469)).collect();
         let without_durations = AudioTrack {
-            track: track(1, ratio(1, 48_000), vec![pts], None),
+            track: track(1, ratio(1, 48_000), pts, None),
             sample_rate: 48_000,
         };
 
@@ -955,7 +939,7 @@ mod tests {
     fn short_audio_tail_is_a_duration_mismatch() {
         // 422 packets end at 432128 ticks (9.002667 s) against 10 s of video.
         assert_eq!(
-            diagnose_streams(clean_video(), vec![audio(1, vec![aac(0..422)])]),
+            diagnose_streams(clean_video(), vec![audio(1, aac(0..422))]),
             vec![Finding {
                 stream: 1,
                 severity: Severity::Major,
@@ -969,10 +953,7 @@ mod tests {
 
     #[test]
     fn reports_each_audio_track_by_stream_index() {
-        let late = audio(
-            2,
-            vec![aac(0..469).into_iter().map(|t| t + 24_000).collect()],
-        );
+        let late = audio(2, aac(0..469).into_iter().map(|t| t + 24_000).collect());
 
         assert_eq!(
             diagnose_streams(clean_video(), vec![clean_audio(1), late]),
@@ -988,22 +969,13 @@ mod tests {
     }
 
     #[test]
-    fn does_not_measure_across_sampled_segments() {
-        // A head and a tail sample: frames 0-9 and 1000-1009, audio packets 0-9 and 780-788.
-        let video = video(vec![frames(0..10), frames(1000..1010)]);
-        let audio = audio(1, vec![aac(0..10), aac(780..789)]);
-
-        assert_eq!(diagnose_streams(video, vec![audio]), vec![]);
-    }
-
-    #[test]
     fn empty_video_skips_audio_comparisons() {
         assert_eq!(
-            diagnose_streams(video(vec![vec![]]), vec![clean_audio(1)]),
+            diagnose_streams(video(vec![]), vec![clean_audio(1)]),
             vec![Finding {
                 stream: 0,
                 severity: Severity::Major,
-                action: Action::None,
+                action: Action::Unsupported,
                 kind: FindingKind::EmptyStream {
                     media: Media::Video,
                 },
@@ -1014,11 +986,11 @@ mod tests {
     #[test]
     fn reports_empty_audio() {
         assert_eq!(
-            diagnose_streams(clean_video(), vec![audio(1, vec![vec![]])]),
+            diagnose_streams(clean_video(), vec![audio(1, vec![])]),
             vec![Finding {
                 stream: 1,
                 severity: Severity::Major,
-                action: Action::None,
+                action: Action::Unsupported,
                 kind: FindingKind::EmptyStream {
                     media: Media::Audio,
                 },
@@ -1034,7 +1006,7 @@ mod tests {
     #[test]
     fn single_frame_and_packet_have_no_findings() {
         assert_eq!(
-            diagnose_streams(video(vec![vec![0]]), vec![audio(1, vec![vec![0]])]),
+            diagnose_streams(video(vec![0]), vec![audio(1, vec![0])]),
             vec![]
         );
     }

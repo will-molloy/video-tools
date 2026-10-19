@@ -5,9 +5,6 @@ expression: "sync_check(&[\"--json\", fixture])"
 exit: 1
 
 {
-  "scope": {
-    "mode": "full"
-  },
   "video": {
     "index": 0,
     "codec": "h264",
