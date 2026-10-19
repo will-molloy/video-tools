@@ -1,0 +1,18 @@
+---
+source: src/tui.rs
+expression: "render(Screen::Running\n{\n    file: \"/videos/stream.mkv\".into(), tool: Tool::SyncCheck, run: RunId(0),\n    cancel: CancellationToken::new(), progress,\n})"
+---
+" vt  › stream.mkv › Sync Check                                                                      "
+" Sync Check ────────────────────────────────────────────────────────────────────────────────────────"
+"Running Sync Check on stream.mkv…                                                                   "
+"                                                                                                    "
+"█████████████████████████████████46% · 123,456 of ~270,000 packets                                  "
+"                                                                                                    "
+"                                                                                                    "
+"                                                                                                    "
+"                                                                                                    "
+"                                                                                                    "
+"                                                                                                    "
+"                                                                                                    "
+"                                                                                                    "
+"Esc cancel                                                                                          "

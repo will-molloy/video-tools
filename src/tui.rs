@@ -3,6 +3,7 @@
 use std::{
     ops::ControlFlow,
     path::{Path, PathBuf},
+    time::Duration,
 };
 
 use anyhow::{Context, Result};
@@ -14,19 +15,30 @@ use ratatui::{
     style::{Color, Modifier, Style, Stylize},
     text::{Line, Span},
     widgets::{
-        Block, Borders, List, ListState, Paragraph, Scrollbar, ScrollbarOrientation,
+        Block, Borders, Gauge, List, ListState, Paragraph, Scrollbar, ScrollbarOrientation,
         ScrollbarState, Wrap,
     },
 };
 use tokio::{
-    sync::mpsc::{self, UnboundedReceiver, UnboundedSender},
-    task::JoinHandle,
+    sync::{
+        mpsc::{self, UnboundedReceiver, UnboundedSender},
+        watch,
+    },
+    time::{self, MissedTickBehavior},
+};
+use tokio_util::sync::CancellationToken;
+
+use crate::{
+    ffprobe::Cancelled,
+    tools::{
+        Tool,
+        chapters::{self, Outcome},
+        sync_check::{self, Progress, Report, diagnose::Severity, thousands},
+    },
 };
 
-use crate::tools::{
-    Tool,
-    chapters::{self, Outcome},
-};
+/// How often the running screen redraws to show progress.
+const PROGRESS_REDRAW: Duration = Duration::from_millis(100);
 
 const VIDEO_EXTENSIONS: &[&str] = &[
     "avi", "flv", "m2ts", "m4v", "mkv", "mov", "mp4", "mts", "ts", "webm", "wmv",
@@ -48,6 +60,10 @@ pub async fn run() -> Result<()> {
 
 type ToolOutput = Vec<Line<'static>>;
 
+/// Tags a tool run, so a result from a cancelled run can't land on a later run's screen.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct RunId(u64);
+
 struct App {
     dir: PathBuf,
     files: Vec<PathBuf>,
@@ -56,7 +72,8 @@ struct App {
     file_list: ListState,
 
     screen: Screen,
-    results_tx: UnboundedSender<ToolOutput>,
+    next_run: u64,
+    results_tx: UnboundedSender<(RunId, ToolOutput)>,
 }
 
 enum Screen {
@@ -68,7 +85,11 @@ enum Screen {
     Running {
         file: PathBuf,
         tool: Tool,
-        task: JoinHandle<()>,
+        run: RunId,
+        cancel: CancellationToken,
+
+        /// Holds the latest report only, so the tool never waits on the UI.
+        progress: watch::Receiver<Option<Progress>>,
     },
     Output {
         file: PathBuf,
@@ -84,12 +105,17 @@ enum Screen {
 }
 
 impl App {
-    fn new(dir: PathBuf, files: Vec<PathBuf>, results_tx: UnboundedSender<ToolOutput>) -> Self {
+    fn new(
+        dir: PathBuf,
+        files: Vec<PathBuf>,
+        results_tx: UnboundedSender<(RunId, ToolOutput)>,
+    ) -> Self {
         App {
             file_list: ListState::default().with_selected(first_index(&files)),
             dir,
             files,
             screen: Screen::PickFile,
+            next_run: 0,
             results_tx,
         }
     }
@@ -97,9 +123,11 @@ impl App {
     async fn run(
         mut self,
         terminal: &mut DefaultTerminal,
-        mut results_rx: UnboundedReceiver<ToolOutput>,
+        mut results_rx: UnboundedReceiver<(RunId, ToolOutput)>,
     ) -> Result<()> {
         let mut events = EventStream::new();
+        let mut redraw = time::interval(PROGRESS_REDRAW);
+        redraw.set_missed_tick_behavior(MissedTickBehavior::Skip);
 
         loop {
             terminal.draw(|frame| self.draw(frame))?;
@@ -114,7 +142,9 @@ impl App {
                         return Ok(());
                     }
                 }
-                Some(lines) = results_rx.recv() => self.on_result(lines),
+                Some((run, lines)) = results_rx.recv() => self.on_result(run, lines),
+                // Wakes the loop only to redraw progress, and only while a tool runs.
+                _ = redraw.tick(), if matches!(self.screen, Screen::Running { .. }) => {}
             }
         }
     }
@@ -148,17 +178,36 @@ impl App {
                     navigate(list, key.code);
                     let selected = list.selected().and_then(|i| Tool::ALL.get(i));
                     match (key.code, selected) {
-                        (KeyCode::Enter, Some(&tool)) => Some(Screen::Running {
-                            file: file.clone(),
-                            tool,
-                            task: spawn_tool(tool, file.clone(), self.results_tx.clone()),
-                        }),
+                        (KeyCode::Enter, Some(&tool)) => {
+                            let run = RunId(self.next_run);
+                            self.next_run += 1;
+                            let cancel = CancellationToken::new();
+                            let (progress_tx, progress) = watch::channel(None);
+                            spawn_tool(
+                                tool,
+                                file.clone(),
+                                run,
+                                cancel.clone(),
+                                progress_tx,
+                                self.results_tx.clone(),
+                            );
+                            Some(Screen::Running {
+                                file: file.clone(),
+                                tool,
+                                run,
+                                cancel,
+                                progress,
+                            })
+                        }
                         _ => None,
                     }
                 }
             }
-            Screen::Running { file, tool, task } => back.then(|| {
-                task.abort();
+            Screen::Running {
+                file, tool, cancel, ..
+            } => back.then(|| {
+                // The task stops its subprocess and exits on its own; its result is discarded.
+                cancel.cancel();
                 tool_picker(file.clone(), *tool)
             }),
             Screen::Output {
@@ -195,9 +244,16 @@ impl App {
         ControlFlow::Continue(())
     }
 
-    fn on_result(&mut self, lines: ToolOutput) {
-        // A result can land just after the user backed out of the running screen.
-        if let Screen::Running { file, tool, .. } = &self.screen {
+    fn on_result(&mut self, run: RunId, lines: ToolOutput) {
+        // Results of cancelled runs still arrive, after the user has left their screen.
+        if let Screen::Running {
+            file,
+            tool,
+            run: current,
+            ..
+        } = &self.screen
+            && *current == run
+        {
             self.screen = Screen::Output {
                 file: file.clone(),
                 tool: *tool,
@@ -238,10 +294,14 @@ impl App {
                 draw_tools(frame, body, list);
                 "↑↓ move · Enter run · q back"
             }
-            Screen::Running { file, tool, .. } => {
-                let text = format!("Running {} on {}…", tool.name(), file_name(file));
-                frame.render_widget(Paragraph::new(text).block(panel(tool.name())), body);
-                "q cancel"
+            Screen::Running {
+                file,
+                tool,
+                progress,
+                ..
+            } => {
+                draw_running(frame, body, *tool, file, *progress.borrow());
+                "Esc cancel"
             }
             Screen::Output {
                 tool,
@@ -280,21 +340,45 @@ fn navigate(list: &mut ListState, code: KeyCode) {
     }
 }
 
-/// Runs a tool in the background and sends its rendered output back to the event loop.
-fn spawn_tool(tool: Tool, file: PathBuf, tx: UnboundedSender<ToolOutput>) -> JoinHandle<()> {
+/// Runs a tool in the background and sends its rendered output back to the event loop. The task
+/// is detached; `cancel` stops it.
+fn spawn_tool(
+    tool: Tool,
+    file: PathBuf,
+    run: RunId,
+    cancel: CancellationToken,
+    progress: watch::Sender<Option<Progress>>,
+    tx: UnboundedSender<(RunId, ToolOutput)>,
+) {
     tokio::spawn(async move {
-        let lines = run_tool(tool, &file)
+        let lines = run_tool(tool, &file, &cancel, &progress)
             .await
             .unwrap_or_else(|e| vec![Line::from(format!("Error: {e:#}")).red()]);
 
         // Fails only if the TUI has exited, in which case nobody needs the result.
-        let _ = tx.send(lines);
-    })
+        let _ = tx.send((run, lines));
+    });
 }
 
-async fn run_tool(tool: Tool, file: &Path) -> Result<ToolOutput> {
+async fn run_tool(
+    tool: Tool,
+    file: &Path,
+    cancel: &CancellationToken,
+    progress: &watch::Sender<Option<Progress>>,
+) -> Result<ToolOutput> {
     match tool {
-        Tool::Chapters => chapters::run(file).await.map(|o| chapters_lines(file, o)),
+        // Dropping the unfinished future on cancel kills ffprobe through `kill_on_drop`.
+        Tool::Chapters => cancel
+            .run_until_cancelled(chapters::run(file))
+            .await
+            .ok_or(Cancelled)?
+            .map(|o| chapters_lines(file, o)),
+        // `send_replace` succeeds even after the UI drops the receiver.
+        Tool::SyncCheck => sync_check::run(file, false, cancel, |p| {
+            progress.send_replace(Some(p));
+        })
+        .await
+        .map(|report| sync_check_lines(&report)),
     }
 }
 
@@ -317,6 +401,30 @@ fn chapters_lines(file: &Path, outcome: Outcome) -> ToolOutput {
             lines
         }
     }
+}
+
+fn sync_check_lines(report: &Report) -> ToolOutput {
+    let mut lines: ToolOutput = report
+        .header()
+        .into_iter()
+        .map(|line| Line::from(line).dark_gray())
+        .collect();
+    lines.push(Line::default());
+    if report.findings.is_empty() {
+        lines.push(Line::from(sync_check::NO_ISSUES).green());
+    }
+    // Blank lines keep wrapped findings apart.
+    for (i, finding) in report.findings.iter().enumerate() {
+        if i > 0 {
+            lines.push(Line::default());
+        }
+        let line = Line::from(finding.to_string());
+        lines.push(match finding.severity {
+            Severity::Major => line.red(),
+            Severity::Minor => line.yellow(),
+        });
+    }
+    lines
 }
 
 const HEADER_LOGO: &str = " vt ";
@@ -401,6 +509,51 @@ fn draw_tools(frame: &mut Frame, area: Rect, state: &mut ListState) {
     frame.render_stateful_widget(list, area, state);
 }
 
+fn draw_running(
+    frame: &mut Frame,
+    area: Rect,
+    tool: Tool,
+    file: &Path,
+    progress: Option<Progress>,
+) {
+    let block = panel(tool.name());
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let [text, _, gauge] = Layout::vertical([
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Length(1),
+    ])
+    .areas(inner);
+    let status = format!("Running {} on {}…", tool.name(), file_name(file));
+    frame.render_widget(Line::from(status), text);
+
+    let Some(Progress { packets, expected }) = progress else {
+        return;
+    };
+    let Some(expected) = expected.filter(|&n| n > 0) else {
+        frame.render_widget(Line::from(format!("{} packets", thousands(packets))), gauge);
+        return;
+    };
+    // The total is an estimate, so hold below 100% until the result replaces this screen.
+    #[allow(clippy::cast_precision_loss)]
+    let ratio = (packets as f64 / expected as f64).min(0.99);
+    let label = format!(
+        "{:.0}% · {} of ~{} packets",
+        ratio * 100.0,
+        thousands(packets),
+        thousands(expected)
+    );
+    frame.render_widget(
+        Gauge::default()
+            .ratio(ratio)
+            .label(label)
+            .gauge_style(Style::new().fg(Color::Cyan).bg(Color::DarkGray)),
+        gauge,
+    );
+}
+
 fn draw_output(
     frame: &mut Frame,
     area: Rect,
@@ -466,7 +619,118 @@ fn is_video(path: &Path) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use insta::assert_snapshot;
+    use ratatui::{Terminal, backend::TestBackend};
+
     use super::*;
+    use crate::{
+        ffprobe::Ratio,
+        tools::sync_check::{
+            AudioSummary, Scope, VideoSummary,
+            diagnose::{Action, Finding, FindingKind, Nanos, Span},
+        },
+    };
+
+    fn render(screen: Screen) -> TestBackend {
+        let (results_tx, _) = mpsc::unbounded_channel();
+        let mut app = App::new(PathBuf::from("/videos"), vec![], results_tx);
+        app.screen = screen;
+        let mut terminal = Terminal::new(TestBackend::new(100, 14)).unwrap();
+        terminal.draw(|frame| app.draw(frame)).unwrap();
+        terminal.backend().clone()
+    }
+
+    fn span(start_ms: i64, end_ms: i64) -> Option<Span> {
+        Some(Span {
+            start: Nanos::from_millis(start_ms),
+            end: Nanos::from_millis(end_ms),
+        })
+    }
+
+    #[test]
+    fn renders_sync_check_results() {
+        let report = Report {
+            scope: Scope::Sampled {
+                head: sync_check::SAMPLE_HEAD,
+                tail: sync_check::SAMPLE_TAIL,
+            },
+            video: VideoSummary {
+                index: 0,
+                codec: "av1".into(),
+                frame_rate: Ratio::new(60, 1).unwrap(),
+                packets: 37_799,
+                span: span(0, 4_500_000),
+            },
+            audio: vec![AudioSummary {
+                index: 1,
+                codec: "aac".into(),
+                sample_rate: 48_000,
+                packets: 29_447,
+                span: span(0, 4_498_200),
+            }],
+            findings: vec![
+                Finding {
+                    stream: 1,
+                    severity: Severity::Minor,
+                    action: Action::FillAudioGaps,
+                    kind: FindingKind::AudioGaps {
+                        count: 1,
+                        total: Nanos::from_millis(32),
+                    },
+                },
+                Finding {
+                    stream: 1,
+                    severity: Severity::Major,
+                    action: Action::StretchAudio,
+                    kind: FindingKind::DurationMismatch {
+                        difference: Nanos::from_millis(-1800),
+                    },
+                },
+            ],
+        };
+
+        assert_snapshot!(render(Screen::Output {
+            file: "/videos/stream.mkv".into(),
+            tool: Tool::SyncCheck,
+            lines: sync_check_lines(&report),
+            scroll: 0,
+            viewport: 0,
+        }));
+    }
+
+    #[test]
+    fn renders_scan_progress() {
+        let (_, progress) = watch::channel(Some(Progress {
+            packets: 123_456,
+            expected: Some(270_000),
+        }));
+
+        assert_snapshot!(render(Screen::Running {
+            file: "/videos/stream.mkv".into(),
+            tool: Tool::SyncCheck,
+            run: RunId(0),
+            cancel: CancellationToken::new(),
+            progress,
+        }));
+    }
+
+    #[test]
+    fn ignores_results_from_cancelled_runs() {
+        let (results_tx, _) = mpsc::unbounded_channel();
+        let mut app = App::new(PathBuf::from("/videos"), vec![], results_tx);
+        let (_, progress) = watch::channel(None);
+        app.screen = Screen::Running {
+            file: "/videos/stream.mkv".into(),
+            tool: Tool::SyncCheck,
+            run: RunId(1),
+            cancel: CancellationToken::new(),
+            progress,
+        };
+
+        app.on_result(RunId(0), vec![Line::from("stale")]);
+
+        assert!(matches!(app.screen, Screen::Running { run: RunId(1), .. }));
+    }
 
     #[test]
     fn truncate_left_keeps_text_that_fits() {

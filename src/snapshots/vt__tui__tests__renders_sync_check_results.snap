@@ -1,0 +1,18 @@
+---
+source: src/tui.rs
+expression: "render(Screen::Output\n{\n    file: \"/videos/stream.mkv\".into(), tool: Tool::SyncCheck, lines:\n    sync_check_lines(&report), scroll: 0, viewport: 0,\n})"
+---
+" vt  › stream.mkv › Sync Check                                                                      "
+" Sync Check ────────────────────────────────────────────────────────────────────────────────────────"
+"Scanned the first 10:00 and last 0:30 only.                                                         "
+"Video #0: av1, 60 fps, 37,799 frames, 0:00.000 to 1:15:00.000                                       "
+"Audio #1: aac, 48000 Hz, 29,447 packets, 0:00.000 to 1:14:58.200                                    "
+"                                                                                                    "
+"minor: audio #1 has 1 gap(s) totalling 32.0 ms. Fix: fill the audio gaps with silence (audio-only   "
+"re-encode).                                                                                         "
+"                                                                                                    "
+"major: audio #1 spans 1.800 s less than video (truncated tail or clock drift). Fix: stretch audio   "
+"to the video's length if it drifts out of sync toward the end; a truncated tail needs no fix.       "
+"                                                                                                    "
+"                                                                                                    "
+"↑↓ PgUp PgDn scroll · q back                                                                        "
