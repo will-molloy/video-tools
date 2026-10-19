@@ -21,7 +21,8 @@ cargo uninstall video-tools
 ## Usage
 
 ```sh
-vt  # open the TUI in the current directory
+vt                # open the TUI in the current directory
+vt chapters FILE  # print a YouTube description chapter list
 ```
 
 ## Development
