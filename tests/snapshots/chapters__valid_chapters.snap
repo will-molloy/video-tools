@@ -1,0 +1,12 @@
+---
+source: tests/chapters.rs
+expression: "chapters(\"chapters-valid.mkv\")"
+---
+exit: 0
+
+stdout:
+0:00 Intro
+0:15 Setup
+0:30 Chapter 3
+
+stderr:

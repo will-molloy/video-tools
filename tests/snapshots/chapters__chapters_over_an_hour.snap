@@ -1,0 +1,12 @@
+---
+source: tests/chapters.rs
+expression: "chapters(\"chapters-hours.mkv\")"
+---
+exit: 0
+
+stdout:
+0:00:00 First half
+0:30:00 Second half
+1:00:00 Credits
+
+stderr:

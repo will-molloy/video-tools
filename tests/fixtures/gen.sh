@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
-# Generates the sync-check fixtures and asserts, with ffprobe, that each has its intended defect.
+# Generates the test fixtures and asserts, with ffprobe, that each has its intended defect.
 #
 # Usage: gen.sh          regenerate every fixture, then check them
 #        gen.sh --check  check the committed fixtures only
 #
-# The checks read timestamps straight from ffprobe rather than through vt, so a fixture that
-# quietly lost its defect fails here instead of producing a passing test.
+# The checks read timestamps and chapters straight from ffprobe rather than through vt, so a
+# fixture that quietly lost its defect fails here instead of producing a passing test.
 
 set -euo pipefail
 cd "$(dirname "$0")"
@@ -49,6 +49,44 @@ generate() {
     # Ends the audio a second before the video, like the AMD recordings.
     "${ff[@]}" "${video[@]}" -f lavfi -i "sine=frequency=440:sample_rate=48000:duration=$((SECS - 1))" \
         "${encode[@]}" audio-short-tail.mp4
+
+    # Three valid chapters. The last is untitled, so vt names it "Chapter 3".
+    chaptered chapters-valid.mkv 45 "0 15 Intro" "15 30 Setup" "30 45"
+
+    # Breaks three YouTube rules: it starts at 0:02, has only two chapters, and the last is 5 s.
+    chaptered chapters-invalid.mkv 25 "2 20 Late start" "20 25 Blink"
+
+    # Runs past an hour, so timestamps switch to H:MM:SS.
+    chaptered chapters-hours.mkv 3660 "0 1800 First half" "1800 3600 Second half" "3600 3660 Credits"
+}
+
+# Encodes a tiny, blank, silent video lasting $2 seconds into $1, with chapters given as
+# "START END [TITLE]" in seconds.
+chaptered() {
+    local out=$1 secs=$2 meta start end title
+    shift 2
+    meta=$(mktemp)
+    {
+        echo ";FFMETADATA1"
+        for chapter in "$@"; do
+            read -r start end title <<<"$chapter"
+            printf '[CHAPTER]\nTIMEBASE=1/1\nSTART=%s\nEND=%s\n' "$start" "$end"
+            if [[ -n $title ]]; then
+                printf 'title=%s\n' "$title"
+            fi
+        done
+    } >"$meta"
+    ffmpeg -v error -y -f lavfi -i "color=black:size=32x32:rate=1:duration=$secs" -i "$meta" \
+        -map 0 -map_metadata 1 -map_chapters 1 -c:v libx264 -preset veryfast -fflags +bitexact "$out"
+    rm "$meta"
+}
+
+# Prints the duration and each chapter as "START-END [TITLE]", in whole seconds, e.g.
+# "45s: 0-15 Intro; 15-30 Setup".
+chapter_list() {
+    printf '%ds:' "$(ffprobe -v error -of csv=p=0 -show_entries format=duration "$1" | cut -d. -f1)"
+    ffprobe -v error -of csv=p=0 -show_entries chapter=start_time,end_time:chapter_tags=title "$1" |
+        awk -F, '{ printf "%s %d-%d%s", (NR > 1 ? ";" : ""), $1, $2, ($3 == "" ? "" : " " $3) }'
 }
 
 # Prints "count first_pts end_pts deltas..." for one stream's kept packets in presentation
@@ -157,6 +195,15 @@ check() {
     read -r start end <<<"$(audio_vs_video_ms "$file")"
     expect_ms "$file" "audio start offset" "$start" -21 21
     expect_ms "$file" "audio end offset" "$end" -1021 -979
+
+    expect chapters-valid.mkv chapters "$(chapter_list chapters-valid.mkv)" \
+        "45s: 0-15 Intro; 15-30 Setup; 30-45"
+    expect chapters-invalid.mkv chapters "$(chapter_list chapters-invalid.mkv)" \
+        "25s: 2-20 Late start; 20-25 Blink"
+    expect chapters-hours.mkv chapters "$(chapter_list chapters-hours.mkv)" \
+        "3660s: 0-1800 First half; 1800-3600 Second half; 3600-3660 Credits"
+    # The chapters tests use this as their file without chapters.
+    expect clean-cfr.mp4 chapters "$(chapter_list clean-cfr.mp4)" "10s:"
 
     if ((failures > 0)); then
         echo "$failures fixture check(s) failed" >&2

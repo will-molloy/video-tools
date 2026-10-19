@@ -1,0 +1,14 @@
+---
+source: tests/chapters.rs
+expression: "chapters(\"chapters-invalid.mkv\")"
+---
+exit: 0
+
+stdout:
+0:02 Late start
+0:20 Blink
+
+stderr:
+warning: first chapter starts at 2s; YouTube requires 0:00
+warning: only 2 chapter(s); YouTube requires at least 3
+warning: chapter 2 "Blink" is 5s long; YouTube requires at least 10s
