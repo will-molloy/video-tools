@@ -186,6 +186,11 @@ impl Outcome {
     }
 }
 
+/// `talk.mp4` is transcribed to `talk.srt`.
+pub fn transcript_path(file: &Path) -> PathBuf {
+    file.with_extension("srt")
+}
+
 /// Transcribes the first audio stream of `path` into `<name>.srt` next to it.
 pub async fn run(
     path: &Path,
@@ -194,7 +199,7 @@ pub async fn run(
     cancel: &CancellationToken,
     mut on_progress: impl FnMut(Progress),
 ) -> Result<Outcome> {
-    let output = path.with_extension("srt");
+    let output = transcript_path(path);
     tools::check_output(&output, force)?;
     let info = ffprobe::streams(path).await?;
     let audio = info
