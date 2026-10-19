@@ -5,36 +5,30 @@
 //! for audio-only inputs, or remuxed with the original video for the rest.
 
 mod cache;
-mod child;
 mod media;
-mod protocol;
 
 use std::{
     fmt,
-    io::{IsTerminal, Write},
     path::{Path, PathBuf},
     process::ExitCode,
 };
 
 use anyhow::{Context, Result, bail};
 use clap::{Args, ValueEnum};
-use tokio::{
-    process::Command,
-    signal::unix::{SignalKind, signal},
-};
+use serde::Deserialize;
 use tokio_util::sync::CancellationToken;
 
 use crate::{
+    ffmpeg,
     ffprobe::{self, Cancelled, StreamKind},
+    ml::{
+        self, child,
+        protocol::{Message, Stats},
+    },
     tools::sync_check::thousands,
 };
 use cache::{Cache, Entry, Key};
 use media::{AudioStream, Encoding, Output};
-use protocol::{Message, Stats};
-
-/// Overrides where `vt` finds the Python project, which defaults to `ml/` in the source tree
-/// `vt` was built from.
-const ML_PROJECT_ENV: &str = "VT_ML_PROJECT";
 
 #[derive(Debug, Args)]
 pub struct DialogueSeparationArgs {
@@ -132,8 +126,7 @@ impl Backend {
         }
     }
 
-    /// The `ml/pyproject.toml` extra holding the model's dependencies. Every model runs on the
-    /// GPU, so it also needs a `Gpu` extra.
+    /// The `ml/pyproject.toml` extra holding the model's dependencies.
     fn extra(self) -> Option<&'static str> {
         match self {
             Backend::Sam => Some("sam"),
@@ -143,91 +136,12 @@ impl Backend {
     }
 }
 
-const GPU_ENV: &str = "VT_GPU";
-
-/// The GPU platform, which picks the torch build the Python stage installs.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Gpu {
-    Rocm,
-    Cuda,
-}
-
-impl Gpu {
-    /// `VT_GPU` if set, otherwise whichever GPU driver is loaded.
-    fn detect() -> Result<Gpu> {
-        Gpu::choose(
-            std::env::var(GPU_ENV).ok().as_deref(),
-            Path::new("/dev/kfd").exists(),
-            Path::new("/proc/driver/nvidia/version").exists(),
-        )
-    }
-
-    fn choose(requested: Option<&str>, amd: bool, nvidia: bool) -> Result<Gpu> {
-        match (requested, amd, nvidia) {
-            (Some("rocm"), ..) | (None, true, false) => Ok(Gpu::Rocm),
-            (Some("cuda"), ..) | (None, false, true) => Ok(Gpu::Cuda),
-            (Some(other), ..) => bail!("{GPU_ENV} is {other:?}; set it to rocm or cuda"),
-            (None, true, true) => {
-                bail!("found AMD and NVIDIA GPU drivers; set {GPU_ENV} to rocm or cuda")
-            }
-            (None, false, false) => {
-                bail!("dialogue-separation needs a GPU, but found no AMD (ROCm) or NVIDIA driver")
-            }
-        }
-    }
-
-    /// The `ml/pyproject.toml` extra holding this platform's torch build.
-    fn extra(self) -> &'static str {
-        match self {
-            Gpu::Rocm => "rocm",
-            Gpu::Cuda => "cuda",
-        }
-    }
-}
-
-const SIGINT: u8 = 2;
-const SIGTERM: u8 = 15;
-
-/// Exits 0 on success, or 128 plus the signal number when SIGINT or SIGTERM cancels the run.
-/// Errors exit 2 from `main`.
 pub async fn cli(args: &DialogueSeparationArgs) -> Result<ExitCode> {
-    let mut interrupt = signal(SignalKind::interrupt()).context("failed to handle SIGINT")?;
-    let mut terminate = signal(SignalKind::terminate()).context("failed to handle SIGTERM")?;
-    let show_progress = std::io::stderr().is_terminal();
     let cancel = CancellationToken::new();
-
     let run = run(&args.file, args.keep, args.backend, &cancel, |progress| {
-        if show_progress {
-            eprint!("\r\x1b[2K{progress}");
-            let _ = std::io::stderr().flush();
-        }
+        ml::cli::show_progress(&progress);
     });
-    tokio::pin!(run);
-
-    // After a signal, keep polling the run so the stage can clean up before `vt` exits.
-    let mut signalled = None;
-    let result = loop {
-        tokio::select! {
-            result = &mut run => break result,
-            _ = interrupt.recv(), if signalled.is_none() => signalled = Some(SIGINT),
-            _ = terminate.recv(), if signalled.is_none() => signalled = Some(SIGTERM),
-        }
-        cancel.cancel();
-    };
-    if show_progress {
-        eprint!("\r\x1b[2K");
-    }
-
-    if let Some(signal) = signalled
-        && result.as_ref().is_err_and(|e| e.is::<Cancelled>())
-    {
-        eprintln!("Cancelled.");
-        return Ok(ExitCode::from(128 + signal));
-    }
-    for line in result?.lines() {
-        println!("{line}");
-    }
-    Ok(ExitCode::SUCCESS)
+    ml::cli::run(&cancel, run, |outcome| outcome.lines()).await
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -395,16 +309,28 @@ async fn separate(
     let pending = cache.begin(key)?;
     let input = pending.dir().join("input.wav");
     // Built first, so a missing GPU fails before extraction.
-    let command = stage_command(backend, &input, pending.dir())?;
+    let mut command = ml::command("separate", backend.extra())?;
+    command
+        .arg("--input")
+        .arg(&input)
+        .arg("--output-dir")
+        .arg(pending.dir())
+        .args(["--backend", backend.name(), "--device", backend.device()]);
 
     on_progress(Progress::Extracting);
     cancel
-        .run_until_cancelled(media::extract(path, audio, backend.sample_rate(), &input))
+        .run_until_cancelled(ffmpeg::extract_audio(
+            path,
+            audio.index,
+            backend.sample_rate(),
+            None,
+            &input,
+        ))
         .await
         .ok_or(Cancelled)??;
 
     on_progress(Progress::Starting);
-    let done = child::run(
+    let done = child::run::<Stems>(
         command,
         cancel,
         child::TERM_GRACE,
@@ -416,15 +342,16 @@ async fn separate(
     )
     .await?;
 
+    let Stems { voice, ambience } = &done.result;
     let expected = (
         pending.dir().join(cache::VOICE),
         pending.dir().join(cache::AMBIENCE),
     );
-    if (done.voice.as_path(), done.ambience.as_path()) != (&expected.0, &expected.1) {
+    if (voice, ambience) != (&expected.0, &expected.1) {
         bail!(
-            "dialogue-separation wrote {} and {}, not the expected {} and {}",
-            done.voice.display(),
-            done.ambience.display(),
+            "the separate stage wrote {} and {}, not the expected {} and {}",
+            voice.display(),
+            ambience.display(),
             expected.0.display(),
             expected.1.display()
         );
@@ -432,31 +359,10 @@ async fn separate(
     pending.commit(&done.stats)
 }
 
-/// `uv run` syncs the backend's extra before starting, so the first run of a backend installs it.
-fn stage_command(backend: Backend, input: &Path, output_dir: &Path) -> Result<Command> {
-    let project = std::env::var_os(ML_PROJECT_ENV).map_or_else(
-        || PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/ml")),
-        PathBuf::from,
-    );
-    if !project.join("pyproject.toml").is_file() {
-        bail!(
-            "no Python project at {}; set {ML_PROJECT_ENV} to vt's ml/ directory",
-            project.display()
-        );
-    }
-    let mut command = Command::new("uv");
-    command.args(["run", "--quiet", "--project"]).arg(project);
-    if let Some(extra) = backend.extra() {
-        command.args(["--extra", extra, "--extra", Gpu::detect()?.extra()]);
-    }
-    command
-        .arg("dialogue-separation")
-        .arg("--input")
-        .arg(input)
-        .arg("--output-dir")
-        .arg(output_dir)
-        .args(["--backend", backend.name(), "--device", backend.device()]);
-    Ok(command)
+#[derive(Debug, Deserialize)]
+struct Stems {
+    voice: PathBuf,
+    ambience: PathBuf,
 }
 
 /// `talk.mp4` becomes `talk.voice.mp4`, or `talk.voice.wav` for audio-only inputs.
@@ -475,44 +381,6 @@ fn output_path(input: &Path, keep: Keep, has_video: bool) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn picks_the_gpu_whose_driver_is_loaded() {
-        assert_eq!(Gpu::choose(None, true, false).unwrap(), Gpu::Rocm);
-        assert_eq!(Gpu::choose(None, false, true).unwrap(), Gpu::Cuda);
-    }
-
-    #[test]
-    fn lets_vt_gpu_override_detection() {
-        assert_eq!(Gpu::choose(Some("cuda"), true, true).unwrap(), Gpu::Cuda);
-        assert_eq!(Gpu::choose(Some("rocm"), false, false).unwrap(), Gpu::Rocm);
-    }
-
-    #[test]
-    fn asks_which_gpu_when_both_drivers_are_loaded() {
-        assert_eq!(
-            Gpu::choose(None, true, true).unwrap_err().to_string(),
-            "found AMD and NVIDIA GPU drivers; set VT_GPU to rocm or cuda"
-        );
-    }
-
-    #[test]
-    fn fails_without_a_gpu() {
-        assert_eq!(
-            Gpu::choose(None, false, false).unwrap_err().to_string(),
-            "dialogue-separation needs a GPU, but found no AMD (ROCm) or NVIDIA driver"
-        );
-    }
-
-    #[test]
-    fn rejects_an_unknown_vt_gpu() {
-        assert_eq!(
-            Gpu::choose(Some("metal"), true, false)
-                .unwrap_err()
-                .to_string(),
-            r#"VT_GPU is "metal"; set it to rocm or cuda"#
-        );
-    }
 
     #[test]
     fn names_video_outputs_after_the_input() {

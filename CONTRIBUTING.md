@@ -39,8 +39,9 @@ uv run --project ml pytest
 
 ### Tests
 
-- Tests need `ffprobe` and `uv` on `PATH`.
+- Tests need `ffmpeg`, `ffprobe` and `uv` on `PATH`.
 - Review snapshot changes with [`cargo insta`](https://insta.rs).
+- `scripts/real-backends.sh` runs SAM Audio and TIGER-DnR on the GPU machine.
 
 ### Fixtures
 

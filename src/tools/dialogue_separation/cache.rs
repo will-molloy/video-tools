@@ -5,21 +5,23 @@
 //! first and last MiB. Hashing whole recordings would take minutes, and an edit that keeps the
 //! size and mtime and touches neither end is not a realistic way for a video to change.
 //!
-//! A run writes into a `<key>.partial-*` directory and renames it into place when it finishes, so
-//! an entry is either complete or absent. Partial directories left by a killed process are swept
-//! on the next run.
+//! A run writes into a scratch directory and renames it into place when it finishes, so an entry
+//! is either complete or absent.
 
 use std::{
     fs::{self, File},
     io::{Read, Seek, SeekFrom},
     path::{Path, PathBuf},
-    sync::atomic::{AtomicU64, Ordering},
     time::UNIX_EPOCH,
 };
 
 use anyhow::{Context, Result};
 
-use super::{Backend, protocol::Stats};
+use super::Backend;
+use crate::ml::{
+    protocol::Stats,
+    scratch::{self, Scratch},
+};
 
 /// Bump when the Python stage's output changes, so stale stems aren't reused.
 const FORMAT: u32 = 1;
@@ -29,8 +31,6 @@ const SAMPLE_BYTES: u64 = 1 << 20;
 pub const VOICE: &str = "voice.wav";
 pub const AMBIENCE: &str = "ambience.wav";
 const STATS: &str = "stats.json";
-
-const PARTIAL: &str = ".partial-";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Key(String);
@@ -76,13 +76,8 @@ pub struct Cache {
 
 impl Cache {
     pub fn new() -> Result<Cache> {
-        let base = std::env::var_os("XDG_CACHE_HOME")
-            .filter(|dir| !dir.is_empty())
-            .map(PathBuf::from)
-            .or_else(|| std::env::home_dir().map(|home| home.join(".cache")))
-            .context("no cache directory: neither XDG_CACHE_HOME nor HOME is set")?;
         Ok(Cache {
-            root: base.join("video-tools").join("dialogue-separation"),
+            root: scratch::cache_dir("dialogue-separation")?,
         })
     }
 
@@ -95,41 +90,12 @@ impl Cache {
         })
     }
 
-    /// Starts a new entry in a fresh partial directory.
+    /// Starts a new entry in a scratch directory.
     pub fn begin(&self, key: &Key) -> Result<Pending> {
-        fs::create_dir_all(&self.root)
-            .with_context(|| format!("failed to create {}", self.root.display()))?;
-        self.sweep();
-
-        // The counter keeps a cancelled run that's still cleaning up from colliding with its
-        // replacement in the same process.
-        static RUNS: AtomicU64 = AtomicU64::new(0);
-        let run = RUNS.fetch_add(1, Ordering::Relaxed);
-        let dir = self
-            .root
-            .join(format!("{}{PARTIAL}{}-{run}", key.0, std::process::id()));
-        fs::create_dir(&dir).with_context(|| format!("failed to create {}", dir.display()))?;
         Ok(Pending {
-            dir,
+            scratch: Scratch::new(&self.root, &key.0)?,
             done: self.root.join(&key.0),
         })
-    }
-
-    /// Removes partial directories whose process has died.
-    fn sweep(&self) {
-        let Ok(entries) = fs::read_dir(&self.root) else {
-            return;
-        };
-        for entry in entries.flatten() {
-            let name = entry.file_name();
-            let Some((_, owner)) = name.to_str().and_then(|n| n.split_once(PARTIAL)) else {
-                continue;
-            };
-            let pid = owner.split('-').next().unwrap_or_default();
-            if !Path::new("/proc").join(pid).exists() {
-                let _ = fs::remove_dir_all(entry.path());
-            }
-        }
     }
 }
 
@@ -148,40 +114,30 @@ impl Entry {
 
 /// An entry being written. Dropping it without [`Pending::commit`] deletes it.
 pub struct Pending {
-    dir: PathBuf,
+    scratch: Scratch,
     done: PathBuf,
 }
 
 impl Pending {
     pub fn dir(&self) -> &Path {
-        &self.dir
+        self.scratch.dir()
     }
 
-    /// Keeps only the stems, then moves the directory into place.
+    /// Keeps only the stems, then moves the directory into place. Another process may have
+    /// finished the same file first, and its entry is as good as this one.
     pub fn commit(self, stats: &Stats) -> Result<Entry> {
-        for entry in fs::read_dir(&self.dir)?.flatten() {
+        for entry in fs::read_dir(self.dir())?.flatten() {
             let name = entry.file_name();
             if name != VOICE && name != AMBIENCE {
                 fs::remove_file(entry.path())?;
             }
         }
-        fs::write(self.dir.join(STATS), serde_json::to_vec(stats)?)?;
-        // Another process may have finished the same file first. Its entry is as good as ours.
-        if !self.done.exists() {
-            fs::rename(&self.dir, &self.done)
-                .with_context(|| format!("failed to move {} into place", self.dir.display()))?;
-        }
+        fs::write(self.dir().join(STATS), serde_json::to_vec(stats)?)?;
+        self.scratch.persist(&self.done)?;
         Ok(Entry {
-            dir: self.done.clone(),
+            dir: self.done,
             stats: stats.clone(),
         })
-    }
-}
-
-impl Drop for Pending {
-    fn drop(&mut self) {
-        // After a commit this is gone, or holds a duplicate of a concurrent run's entry.
-        let _ = fs::remove_dir_all(&self.dir);
     }
 }
 
@@ -333,22 +289,5 @@ mod tests {
         drop(pending);
 
         assert_eq!(fs::read_dir(root.path()).unwrap().count(), 0);
-    }
-
-    #[test]
-    fn sweeps_partial_entries_of_dead_processes() {
-        let root = tempfile::tempdir().unwrap();
-        let cache = Cache {
-            root: root.path().into(),
-        };
-        // No process has this pid: Linux caps pids at 2^22.
-        let dead = root.path().join("sam-abc.partial-99999999-0");
-        fs::create_dir(&dead).unwrap();
-        let key = Key::from_parts(Backend::Fake, 1, 2, b"", b"");
-
-        let live = cache.begin(&key).unwrap();
-
-        assert!(!dead.exists());
-        assert!(live.dir().exists());
     }
 }

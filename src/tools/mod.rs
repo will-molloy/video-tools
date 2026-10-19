@@ -6,6 +6,7 @@ use std::{
 use anyhow::anyhow;
 
 pub mod chapters;
+pub mod dialogue_separation;
 pub mod sync_check;
 pub mod transcribe;
 
@@ -46,16 +47,30 @@ pub enum Tool {
     Chapters,
     SyncCheck,
     Transcribe,
+
+    /// `dialogue-separation --keep voice`.
+    RemoveNoise,
+
+    /// `dialogue-separation --keep ambience`.
+    RemoveVoice,
 }
 
 impl Tool {
-    pub const ALL: [Tool; 3] = [Tool::Chapters, Tool::SyncCheck, Tool::Transcribe];
+    pub const ALL: [Tool; 5] = [
+        Tool::Chapters,
+        Tool::SyncCheck,
+        Tool::Transcribe,
+        Tool::RemoveNoise,
+        Tool::RemoveVoice,
+    ];
 
     pub fn name(self) -> &'static str {
         match self {
             Tool::Chapters => "Chapters",
             Tool::SyncCheck => "Sync Check",
             Tool::Transcribe => "Transcribe",
+            Tool::RemoveNoise => "Remove noise",
+            Tool::RemoveVoice => "Remove voice",
         }
     }
 
@@ -64,6 +79,8 @@ impl Tool {
             Tool::Chapters => "YouTube description chapter list",
             Tool::SyncCheck => "Diagnose audio/video sync problems",
             Tool::Transcribe => "Extract dialogue to .srt file",
+            Tool::RemoveNoise => "Keep dialogue, drop everything else",
+            Tool::RemoveVoice => "Keep everything but dialogue",
         }
     }
 }

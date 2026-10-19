@@ -59,6 +59,11 @@ generate() {
     # Runs past an hour, so timestamps switch to H:MM:SS.
     chaptered chapters-hours.mkv 3660 "0 1800 First half" "1800 3600 Second half" "3600 3660 Credits"
 
+    # Audio only, with a different tone in each channel so a swap or downmix shows.
+    "${ff[@]}" "${audio[@]}" -f lavfi -i "sine=frequency=660:sample_rate=48000:duration=$SECS" \
+        -filter_complex "[0][1]amerge=inputs=2" -c:a aac -b:a 128k -map_metadata -1 \
+        -fflags +bitexact stereo-tone.m4a
+
     speech_bursts
 }
 
@@ -223,6 +228,10 @@ check() {
         "3660s: 0-1800 First half; 1800-3600 Second half; 3600-3660 Credits"
     # The chapters tests use this as their file without chapters.
     expect clean-cfr.mp4 chapters "$(chapter_list clean-cfr.mp4)" "10s:"
+
+    expect stereo-tone.m4a streams \
+        "$(ffprobe -v error -of csv=p=0 -show_entries stream=codec_type,channels stereo-tone.m4a)" \
+        "audio,2"
 
     file=speech-bursts.mkv
     expect "$file" "audio" "$(ffprobe -v error -of csv=p=0 -select_streams a \
