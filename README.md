@@ -10,12 +10,18 @@ cargo install --path .
 ```
 
 This installs `vt` to `~/.cargo/bin`.
-Rerun it to update; `cargo uninstall video-tools` removes it.
+Rerun it to update.
+
+## Uninstall
+
+```sh
+cargo uninstall video-tools
+```
 
 ## Usage
 
 ```sh
-vt                      # open the TUI in the current directory
+vt  # open the TUI in the current directory
 ```
 
 ## Development
