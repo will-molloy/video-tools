@@ -44,7 +44,22 @@ struct Workspace {
     dir: TempDir,
 }
 
+/// A transcript with one line covering any file.
+const WHOLE_FILE_SRT: &str = "1\n00:00:00,000 --> 01:00:00,000\nspeech\n\n";
+
 impl Workspace {
+    /// A workspace holding `fixture` and a transcript that covers all of it.
+    fn transcribed(fixture: &str) -> Workspace {
+        let workspace = Workspace::with(fixture);
+        workspace.write_transcript(fixture, WHOLE_FILE_SRT);
+        workspace
+    }
+
+    /// Writes the default transcript of `fixture`, such as `talk.srt` for `talk.mp4`.
+    fn write_transcript(&self, fixture: &str, srt: &str) {
+        fs::write(self.path(&fixture_srt(fixture)), srt).unwrap();
+    }
+
     fn with(fixture: &str) -> Workspace {
         let workspace = Workspace {
             dir: tempfile::tempdir().unwrap(),
@@ -97,6 +112,13 @@ impl Workspace {
     fn cache_entries(&self) -> Vec<String> {
         names(&self.cache())
     }
+}
+
+fn fixture_srt(fixture: &str) -> String {
+    format!(
+        "{}.srt",
+        Path::new(fixture).file_stem().unwrap().to_str().unwrap()
+    )
 }
 
 fn names(dir: &Path) -> Vec<String> {
@@ -252,13 +274,16 @@ fn assert_remuxed(output: &Path, source: &Path) {
 #[test]
 fn keep_voice_remuxes_the_video() {
     let _mask = mask_elapsed();
-    let workspace = Workspace::with("clean-cfr.mp4");
+    let workspace = Workspace::transcribed("clean-cfr.mp4");
 
     assert_snapshot!(workspace.vt(&["clean-cfr.mp4", "--keep", "voice"]));
 
     let source = workspace.path("clean-cfr.mp4");
     let out = workspace.path("clean-cfr.voice.mp4");
-    assert_eq!(workspace.files(), ["clean-cfr.mp4", "clean-cfr.voice.mp4"]);
+    assert_eq!(
+        workspace.files(),
+        ["clean-cfr.mp4", "clean-cfr.srt", "clean-cfr.voice.mp4"]
+    );
     assert_remuxed(&out, &source);
     assert_audio_matches(&out, &source, 1.0);
 }
@@ -266,7 +291,7 @@ fn keep_voice_remuxes_the_video() {
 #[test]
 fn keep_ambience_remuxes_the_video() {
     let _mask = mask_elapsed();
-    let workspace = Workspace::with("clean-cfr.mp4");
+    let workspace = Workspace::transcribed("clean-cfr.mp4");
 
     assert_snapshot!(workspace.vt(&["clean-cfr.mp4", "--keep", "ambience"]));
 
@@ -279,7 +304,7 @@ fn keep_ambience_remuxes_the_video() {
 #[test]
 fn remuxes_matroska_without_a_recorded_bit_rate() {
     let _mask = mask_elapsed();
-    let workspace = Workspace::with("clean-cfr.mkv");
+    let workspace = Workspace::transcribed("clean-cfr.mkv");
     let source = workspace.path("clean-cfr.mkv");
     // Matroska files ffmpeg writes record no bit rate, so vt measures it.
     assert_eq!(
@@ -294,7 +319,7 @@ fn remuxes_matroska_without_a_recorded_bit_rate() {
 
 #[test]
 fn keeps_the_audio_start_offset() {
-    let workspace = Workspace::with("audio-offset.mp4");
+    let workspace = Workspace::transcribed("audio-offset.mp4");
     let source = workspace.path("audio-offset.mp4");
 
     workspace.vt(&["audio-offset.mp4", "--keep", "voice"]);
@@ -312,14 +337,18 @@ fn keeps_the_audio_start_offset() {
 #[test]
 fn writes_a_wav_for_audio_only_input() {
     let _mask = mask_elapsed();
-    let workspace = Workspace::with("stereo-tone.m4a");
+    let workspace = Workspace::transcribed("stereo-tone.m4a");
 
     assert_snapshot!(workspace.vt(&["stereo-tone.m4a", "--keep", "voice"]));
 
     let out = workspace.path("stereo-tone.voice.wav");
     assert_eq!(
         workspace.files(),
-        ["stereo-tone.m4a", "stereo-tone.voice.wav"]
+        [
+            "stereo-tone.m4a",
+            "stereo-tone.srt",
+            "stereo-tone.voice.wav"
+        ]
     );
     assert_eq!(
         probe(&out, "a", "stream=codec_name,sample_rate,channels"),
@@ -332,7 +361,7 @@ fn writes_a_wav_for_audio_only_input() {
 #[test]
 fn reuses_cached_stems_without_running_the_model() {
     let _mask = mask_elapsed();
-    let workspace = Workspace::with("clean-cfr.mp4");
+    let workspace = Workspace::transcribed("clean-cfr.mp4");
     workspace.vt(&["clean-cfr.mp4", "--keep", "voice"]);
 
     // With no Python project to run, only a cache hit can succeed.
@@ -353,7 +382,7 @@ fn reuses_cached_stems_without_running_the_model() {
 #[test]
 fn separates_again_after_the_file_changes() {
     let _mask = mask_elapsed();
-    let workspace = Workspace::with("clean-cfr.mp4");
+    let workspace = Workspace::transcribed("clean-cfr.mp4");
     workspace.vt(&["clean-cfr.mp4", "--keep", "voice"]);
     fs::copy(
         Path::new(common::FIXTURES).join("audio-offset.mp4"),
@@ -380,7 +409,7 @@ fn processes_mentioning(needle: &str) -> Vec<i32> {
 
 #[test]
 fn cancels_on_sigint_and_cleans_up() {
-    let workspace = Workspace::with("clean-cfr.mp4");
+    let workspace = Workspace::transcribed("clean-cfr.mp4");
     let child = workspace
         .command(&["clean-cfr.mp4", "--keep", "voice"])
         .env(FAKE_DELAY_ENV, "0.5")
@@ -415,8 +444,100 @@ fn cancels_on_sigint_and_cleans_up() {
 
     assert_snapshot!(common::render(&output));
     assert_eq!(workspace.cache_entries(), Vec::<String>::new());
-    assert_eq!(workspace.files(), ["clean-cfr.mp4"]);
+    assert_eq!(workspace.files(), ["clean-cfr.mp4", "clean-cfr.srt"]);
     assert_eq!(processes_mentioning(&partial), Vec::<i32>::new());
+}
+
+#[test]
+fn fails_without_a_transcript() {
+    let workspace = Workspace::with("clean-cfr.mp4");
+
+    assert_snapshot!(workspace.vt(&["clean-cfr.mp4", "--keep", "voice"]));
+
+    assert_eq!(workspace.files(), ["clean-cfr.mp4"]);
+    assert_eq!(workspace.cache_entries(), Vec::<String>::new());
+}
+
+#[test]
+fn fails_on_a_malformed_transcript() {
+    let workspace = Workspace::with("clean-cfr.mp4");
+    workspace.write_transcript("clean-cfr.mp4", "1\nsoon --> later\nhello\n");
+
+    assert_snapshot!(workspace.vt(&["clean-cfr.mp4", "--keep", "voice"]));
+}
+
+#[test]
+fn reads_a_transcript_from_another_path() {
+    let workspace = Workspace::with("stereo-tone.m4a");
+    fs::write(workspace.path("lines.srt"), WHOLE_FILE_SRT).unwrap();
+
+    workspace.vt(&[
+        "stereo-tone.m4a",
+        "--keep",
+        "voice",
+        "--transcript",
+        "lines.srt",
+    ]);
+
+    assert_audio_matches(
+        &workspace.path("stereo-tone.voice.wav"),
+        &workspace.path("stereo-tone.m4a"),
+        1.0,
+    );
+}
+
+/// RMS of a file's first audio stream between two times, over all channels.
+#[allow(clippy::cast_precision_loss)]
+fn rms_between(path: &Path, from_secs: f64, to_secs: f64) -> f64 {
+    let (samples, channels) = decode(path);
+    let at = |secs: f64| (secs * 48_000.0) as usize * usize::from(channels);
+    let window = &samples[at(from_secs)..at(to_secs)];
+    (window.iter().map(|s| f64::from(*s).powi(2)).sum::<f64>() / window.len() as f64).sqrt()
+}
+
+#[test]
+fn separates_only_the_speech_in_the_transcript() {
+    let _mask = mask_elapsed();
+    let workspace = Workspace::with("speech-bursts.mkv");
+    // The fixture has tone bursts at 1-2 s and 3.5-4.5 s. Only the first is marked as speech.
+    workspace.write_transcript(
+        "speech-bursts.mkv",
+        "1\n00:00:01,000 --> 00:00:02,000\nspeech\n\n",
+    );
+    let source = workspace.path("speech-bursts.mkv");
+    let level = rms_between(&source, 1.3, 1.7);
+
+    assert_snapshot!(workspace.vt(&["speech-bursts.mkv", "--keep", "voice"]));
+    workspace.vt(&["speech-bursts.mkv", "--keep", "ambience"]);
+
+    let voice = workspace.path("speech-bursts.voice.mkv");
+    let ambience = workspace.path("speech-bursts.ambience.mkv");
+    // Inside the speech the fake model keeps the voice whole and the ambience at a quarter.
+    assert_close(rms_between(&voice, 1.3, 1.7), level, 0.02);
+    assert_close(rms_between(&ambience, 1.3, 1.7), level * 0.25, 0.02);
+    // Outside it the voice is silent and the ambience is the original.
+    assert!(rms_between(&voice, 3.6, 4.4) < 1e-4);
+    assert_close(rms_between(&ambience, 3.6, 4.4), level, 0.02);
+}
+
+#[test]
+fn separates_again_after_the_transcript_changes() {
+    let _mask = mask_elapsed();
+    let workspace = Workspace::with("speech-bursts.mkv");
+    workspace.write_transcript(
+        "speech-bursts.mkv",
+        "1\n00:00:01,000 --> 00:00:02,000\nspeech\n\n",
+    );
+    workspace.vt(&["speech-bursts.mkv", "--keep", "voice"]);
+    workspace.write_transcript(
+        "speech-bursts.mkv",
+        "1\n00:00:01,000 --> 00:00:02,000\nspeech\n\n\
+         2\n00:00:03,500 --> 00:00:04,500\nmumbling\n\n",
+    );
+
+    assert_snapshot!(workspace.vt(&["speech-bursts.mkv", "--keep", "voice"]));
+
+    assert_eq!(workspace.cache_entries().len(), 2);
 }
 
 #[test]
@@ -558,6 +679,7 @@ fn separates_the_synthetic_clip(backend: &str) {
         dir: tempfile::tempdir().unwrap(),
     };
     synthetic_clip(&workspace);
+    workspace.write_transcript("clip.mp4", WHOLE_FILE_SRT);
 
     // The second run reuses the first's cached stems.
     for keep in ["voice", "ambience"] {

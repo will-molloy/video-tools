@@ -1,0 +1,12 @@
+---
+source: tests/dialogue_separation.rs
+expression: "workspace.vt(&[\"speech-bursts.mkv\", \"--keep\", \"voice\"])"
+---
+exit: 0
+
+stdout:
+Kept the voice in speech-bursts.voice.mkv.
+Separated with the fake backend on cpu in [elapsed] s.
+1 speech interval, 4.0 s in all.
+
+stderr:

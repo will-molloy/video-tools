@@ -1,6 +1,8 @@
 """`vt-ml separate`: split a WAV into voice and ambience stems."""
 
 import argparse
+import json
+import math
 from collections.abc import Callable
 from pathlib import Path
 
@@ -13,6 +15,12 @@ class Separate:
     def configure(self, parser: argparse.ArgumentParser) -> None:
         parser.add_argument("--input", type=Path, required=True, help="WAV at the backend's rate")
         parser.add_argument("--output-dir", type=Path, required=True)
+        parser.add_argument(
+            "--speech",
+            type=Path,
+            required=True,
+            help="JSON list of [start, end] seconds; only these are separated",
+        )
         parser.add_argument(
             "--backend", type=backends.Name, choices=list(backends.Name), required=True
         )
@@ -29,15 +37,31 @@ class Separate:
             raise UsageError(f"input {args.input} does not exist")
         if not args.output_dir.is_dir():
             raise UsageError(f"output directory {args.output_dir} does not exist")
+        spans = _read_spans(args.speech)
 
         backend = backends.load(args.backend, args.device, report)
         report(f"Separating on {backend.device}")
-        voice, ambience = pipeline.separate_file(args.input, args.output_dir, backend, progress)
+        voice, ambience = pipeline.separate_file(
+            args.input, args.output_dir, backend, spans, progress
+        )
         return Finished(
             {"voice": str(voice), "ambience": str(ambience)},
             backend.device,
             backend.peak_vram_mb(),
         )
+
+
+def _read_spans(path: Path) -> list[tuple[float, float]]:
+    if not path.is_file():
+        raise UsageError(f"speech file {path} does not exist")
+    try:
+        spans = [(float(start), float(end)) for start, end in json.loads(path.read_text())]
+    except (ValueError, TypeError) as e:
+        raise UsageError(f"speech file {path} must be a JSON list of [start, end] pairs") from e
+    for start, end in spans:
+        if not (math.isfinite(start) and math.isfinite(end) and 0 <= start < end):
+            raise UsageError(f"speech span [{start}, {end}] must satisfy 0 <= start < end")
+    return spans
 
 
 STAGE = Separate()

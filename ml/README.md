@@ -75,14 +75,17 @@ vt-ml transcribe --input IN.wav --backend whisper|fake --device cuda|cpu
 ### `separate`
 
 ```sh
-vt-ml separate --input IN.wav --output-dir DIR --backend sam|tiger|fake --device cuda|cpu
+vt-ml separate --input IN.wav --output-dir DIR --speech SPEECH.json --backend sam|tiger|fake --device cuda|cpu
 ```
 
 - `--input` is a WAV at the backend's sample rate, in any channel count
+- `--speech` is a JSON list of `[start, end]` seconds, which `vt` builds from the transcript with padding
+- Only the speech spans go to the model. Outside them voice is silence and ambience is the input.
+- Inside a span the stems fade in and out over its first and last 0.25 s, using the chunking ramp, unless the span touches the start or end of the file
 - `DIR/voice.wav` and `DIR/ambience.wav` are always both written, since one pass produces both
 - Both are RF64 float32 with the input's rate, channel count and length
 - Both are removed on any failure, including SIGTERM
-- `progress` counts one step per channel per chunk
+- `progress` counts one step per channel per chunk, over the chunks inside the spans
 - `done` adds `voice` and `ambience`, the paths written
 
 | Backend | Model                                       | Voice     | Ambience                    |

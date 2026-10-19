@@ -1,0 +1,10 @@
+---
+source: tests/dialogue_separation.rs
+expression: "workspace.vt(&[\"clean-cfr.mp4\", \"--keep\", \"voice\"])"
+---
+exit: 2
+
+stdout:
+
+stderr:
+Error: no transcript at clean-cfr.srt; run `vt transcribe clean-cfr.mp4` first

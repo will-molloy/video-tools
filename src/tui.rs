@@ -591,7 +591,8 @@ async fn run_job(
             .map(|outcome| ml_lines(outcome.lines()))
         }
         Job::Separate(keep, backend) => {
-            dialogue_separation::run(file, keep, backend, cancel, |p| {
+            let transcript = transcribe::transcript_path(file);
+            dialogue_separation::run(file, &transcript, keep, backend, cancel, |p| {
                 progress.send_replace(Some(Progress::Separation(p)));
             })
             .await
