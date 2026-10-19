@@ -3,11 +3,18 @@ name = "vt-ml"
 version = "0.1.0"
 description = "The machine-learning stages of vt"
 requires-python = ">=3.12,<3.13"
-dependencies = []
+dependencies = [
+  "numpy>=1.26.4",
+  "soundfile>=0.14.0",
+]
 
 # Each stage's model is an extra, so the `fake` backends, and CI, install no ML stack. A model's
 # extra goes with one GPU extra, `rocm` or `cuda`, which picks the torch build.
 [project.optional-dependencies]
+whisper = [
+  "torch==2.11.0",
+  "transformers>=5.20.1",
+]
 rocm = [
   "torch==2.11.0",
   "triton-rocm",
