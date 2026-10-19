@@ -1886,9 +1886,11 @@ dependencies = [
  "crossterm",
  "futures",
  "insta",
+ "nix 0.31.3",
  "ratatui",
  "serde",
  "serde_json",
+ "tempfile",
  "tokio",
  "tokio-util",
 ]

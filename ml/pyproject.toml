@@ -1,0 +1,52 @@
+[project]
+name = "vt-ml"
+version = "0.1.0"
+description = "The machine-learning stages of vt"
+requires-python = ">=3.12,<3.13"
+dependencies = []
+
+# Each stage's model is an extra, so the `fake` backends, and CI, install no ML stack. A model's
+# extra goes with one GPU extra, `rocm` or `cuda`, which picks the torch build.
+[project.optional-dependencies]
+rocm = [
+  "torch==2.11.0",
+  "triton-rocm",
+]
+cuda = [
+  "torch==2.11.0",
+]
+
+[project.scripts]
+vt-ml = "vt_ml.cli:main"
+
+[dependency-groups]
+dev = ["pytest>=9.1.1"]
+
+[build-system]
+requires = ["uv_build>=0.12.19,<0.13"]
+build-backend = "uv_build"
+
+[tool.uv]
+conflicts = [[{ extra = "rocm" }, { extra = "cuda" }]]
+
+[tool.uv.sources]
+torch = [
+  { index = "pytorch-rocm", extra = "rocm" },
+  { index = "pytorch-cuda", extra = "cuda" },
+]
+triton-rocm = { index = "pytorch-rocm", extra = "rocm" }
+
+# ROCm 7.2 is the newest index with a torchaudio build, which pins torch to 2.11.
+[[tool.uv.index]]
+name = "pytorch-rocm"
+url = "https://download.pytorch.org/whl/rocm7.2"
+explicit = true
+
+# CUDA 12.8 supports NVIDIA's GPUs from Turing (RTX 20) to Blackwell (RTX 50).
+[[tool.uv.index]]
+name = "pytorch-cuda"
+url = "https://download.pytorch.org/whl/cu128"
+explicit = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

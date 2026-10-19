@@ -1,0 +1,42 @@
+inputs:
+  codecov-token:
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - uses: ./.github/actions/setup-rust
+
+    - name: Check formatting
+      shell: bash
+      run: cargo fmt --check
+
+    - name: Lint
+      shell: bash
+      run: cargo clippy --all-targets --locked -- -D warnings
+
+    - name: Build
+      shell: bash
+      run: cargo build --locked
+
+    - name: Install ffmpeg
+      shell: bash
+      run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ffmpeg
+
+    - name: Check fixtures
+      shell: bash
+      run: tests/fixtures/gen.sh --check
+
+    - name: Install cargo-llvm-cov
+      uses: taiki-e/install-action@cargo-llvm-cov
+
+    - name: Test
+      shell: bash
+      run: cargo llvm-cov --locked --lcov --output-path lcov.info
+
+    - name: Upload coverage to Codecov
+      uses: codecov/codecov-action@v7
+      with:
+        files: lcov.info
+        fail_ci_if_error: true
+        token: ${{ inputs.codecov-token }}

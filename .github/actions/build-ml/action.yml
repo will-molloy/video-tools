@@ -1,0 +1,16 @@
+runs:
+  using: composite
+  steps:
+    - name: Setup uv
+      uses: astral-sh/setup-uv@v10.3.0
+      with:
+        enable-cache: true
+        cache-dependency-glob: ml/uv.lock
+
+    - name: Sync
+      shell: bash
+      run: uv sync --locked --project ml
+
+    - name: Test
+      shell: bash
+      run: uv run --project ml pytest
