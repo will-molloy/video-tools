@@ -95,6 +95,9 @@ pub struct Stream {
     /// Containers that index their packets (MP4) report this; Matroska doesn't.
     pub packet_count: Option<u64>,
 
+    /// When the first packet plays. Negative starts, such as AAC priming, clamp to zero.
+    pub start: Option<Duration>,
+
     pub kind: StreamKind,
 }
 
@@ -107,6 +110,11 @@ pub enum StreamKind {
     },
     Audio {
         sample_rate: u32,
+        channels: u16,
+
+        /// Bits per second, from the stream header or Matroska's `BPS` statistics tag. `None`
+        /// when neither is present, e.g. in Matroska files ffmpeg wrote.
+        bit_rate: Option<u64>,
     },
 
     /// Subtitles, data, attachments, and cover art (an attached picture is a one-frame video
@@ -119,8 +127,9 @@ pub async fn streams(path: &Path) -> Result<Streams> {
         path,
         &[
             "-show_entries",
-            "stream=index,codec_type,codec_name,time_base,r_frame_rate,sample_rate,nb_frames\
-             :stream_disposition=attached_pic:format=duration",
+            "stream=index,codec_type,codec_name,time_base,r_frame_rate,sample_rate,channels,\
+             bit_rate,start_time,nb_frames:stream_tags=BPS:stream_disposition=attached_pic\
+             :format=duration",
         ],
     )
     .await?;
@@ -139,6 +148,40 @@ fn parse_streams(json: &[u8]) -> Result<Streams> {
         streams,
         duration: raw.format.and_then(|f| f.duration),
     })
+}
+
+/// Measures a stream's average bit rate from its packets, for files that don't record one. Reads
+/// every packet header, so it costs about as much as demuxing the file.
+pub async fn measured_bit_rate(path: &Path, stream: usize) -> Result<Option<u64>> {
+    let stream = stream.to_string();
+    let stdout = run(
+        path,
+        &[
+            "-select_streams",
+            &stream,
+            "-show_entries",
+            "packet=size,duration_time",
+        ],
+    )
+    .await?;
+    parse_bit_rate(&stdout)
+}
+
+/// Returns `None` when the packets carry no durations to divide by.
+#[allow(
+    clippy::cast_precision_loss,
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss
+)]
+fn parse_bit_rate(json: &[u8]) -> Result<Option<u64>> {
+    let raw: RawPackets =
+        serde_json::from_slice(json).context("failed to parse ffprobe packets")?;
+    let (bytes, secs) = raw.packets.iter().fold((0u64, 0.0), |(bytes, secs), p| {
+        let size: u64 = p.size.parse().unwrap_or(0);
+        let duration = p.duration_time.as_deref().and_then(|d| d.parse().ok());
+        (bytes + size, secs + duration.unwrap_or(0.0))
+    });
+    Ok((secs > 0.0).then(|| (bytes as f64 * 8.0 / secs).round() as u64))
 }
 
 /// One demuxed packet. Packets arrive in decode order, so video `pts` can go backwards when the
@@ -335,9 +378,33 @@ struct RawStream {
     time_base: String,
     r_frame_rate: Option<String>,
     sample_rate: Option<String>,
+    channels: Option<u16>,
+    bit_rate: Option<String>,
+    #[serde(default, deserialize_with = "optional_seconds")]
+    start_time: Option<Duration>,
     nb_frames: Option<String>,
     #[serde(default)]
+    tags: RawStreamTags,
+    #[serde(default)]
     disposition: RawDisposition,
+}
+
+#[derive(Deserialize, Default)]
+struct RawStreamTags {
+    #[serde(rename = "BPS")]
+    bps: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct RawPackets {
+    #[serde(default)]
+    packets: Vec<RawPacket>,
+}
+
+#[derive(Deserialize)]
+struct RawPacket {
+    size: String,
+    duration_time: Option<String>,
 }
 
 #[derive(Deserialize, Default)]
@@ -366,6 +433,13 @@ impl TryFrom<RawStream> for Stream {
                     .as_deref()
                     .and_then(|rate| rate.parse().ok())
                     .with_context(|| format!("audio stream {} has no sample rate", raw.index))?,
+                channels: raw
+                    .channels
+                    .with_context(|| format!("audio stream {} has no channel count", raw.index))?,
+                bit_rate: raw
+                    .bit_rate
+                    .or(raw.tags.bps)
+                    .and_then(|rate| rate.parse().ok()),
             },
             _ => StreamKind::Other,
         };
@@ -374,6 +448,7 @@ impl TryFrom<RawStream> for Stream {
             codec: raw.codec_name.unwrap_or_else(|| "unknown".into()),
             time_base,
             packet_count: raw.nb_frames.and_then(|n| n.parse().ok()),
+            start: raw.start_time,
             kind,
         })
     }
@@ -459,9 +534,18 @@ mod tests {
             "programs": [], "stream_groups": [],
             "streams": [
                 { "index": 0, "codec_name": "h264", "codec_type": "video", "r_frame_rate": "60/1",
-                  "time_base": "1/1000", "disposition": { "attached_pic": 0 } },
+                  "time_base": "1/1000", "start_time": "0.000000",
+                  "disposition": { "attached_pic": 0 } },
                 { "index": 1, "codec_name": "aac", "codec_type": "audio", "sample_rate": "48000",
-                  "r_frame_rate": "0/0", "time_base": "1/48000", "nb_frames": "470",
+                  "channels": 2, "r_frame_rate": "0/0", "time_base": "1/48000",
+                  "start_time": "-0.021333", "bit_rate": "320000", "nb_frames": "470",
+                  "disposition": { "attached_pic": 0 } },
+                { "index": 4, "codec_name": "opus", "codec_type": "audio", "sample_rate": "48000",
+                  "channels": 1, "r_frame_rate": "0/0", "time_base": "1/1000",
+                  "start_time": "0.500000", "tags": { "BPS": "96000" },
+                  "disposition": { "attached_pic": 0 } },
+                { "index": 5, "codec_name": "flac", "codec_type": "audio", "sample_rate": "44100",
+                  "channels": 6, "r_frame_rate": "0/0", "time_base": "1/1000",
                   "disposition": { "attached_pic": 0 } },
                 { "index": 2, "codec_name": "mjpeg", "codec_type": "video",
                   "r_frame_rate": "90000/1", "time_base": "1/90000",
@@ -481,6 +565,7 @@ mod tests {
                         codec: "h264".into(),
                         time_base: Ratio::new(1, 1000).unwrap(),
                         packet_count: None,
+                        start: Some(Duration::ZERO),
                         kind: StreamKind::Video {
                             frame_rate: Ratio::new(60, 1),
                         },
@@ -490,8 +575,35 @@ mod tests {
                         codec: "aac".into(),
                         time_base: Ratio::new(1, 48_000).unwrap(),
                         packet_count: Some(470),
+                        start: Some(Duration::ZERO),
                         kind: StreamKind::Audio {
-                            sample_rate: 48_000
+                            sample_rate: 48_000,
+                            channels: 2,
+                            bit_rate: Some(320_000),
+                        },
+                    },
+                    Stream {
+                        index: 4,
+                        codec: "opus".into(),
+                        time_base: Ratio::new(1, 1000).unwrap(),
+                        packet_count: None,
+                        start: Some(Duration::from_millis(500)),
+                        kind: StreamKind::Audio {
+                            sample_rate: 48_000,
+                            channels: 1,
+                            bit_rate: Some(96_000),
+                        },
+                    },
+                    Stream {
+                        index: 5,
+                        codec: "flac".into(),
+                        time_base: Ratio::new(1, 1000).unwrap(),
+                        packet_count: None,
+                        start: None,
+                        kind: StreamKind::Audio {
+                            sample_rate: 44_100,
+                            channels: 6,
+                            bit_rate: None,
                         },
                     },
                     Stream {
@@ -499,6 +611,7 @@ mod tests {
                         codec: "mjpeg".into(),
                         time_base: Ratio::new(1, 90_000).unwrap(),
                         packet_count: None,
+                        start: None,
                         kind: StreamKind::Other,
                     },
                     Stream {
@@ -506,6 +619,7 @@ mod tests {
                         codec: "vfr".into(),
                         time_base: Ratio::new(1, 90_000).unwrap(),
                         packet_count: None,
+                        start: None,
                         kind: StreamKind::Video { frame_rate: None },
                     },
                 ],
@@ -544,6 +658,25 @@ mod tests {
                 discard: false,
             })
         );
+    }
+
+    #[test]
+    fn measures_bit_rate_from_packet_sizes() {
+        // 3 packets of 1000 bytes over 0.1 s is 240 kb/s.
+        let json = br#"{ "packets": [
+            { "size": "1000", "duration_time": "0.032000" },
+            { "size": "1000", "duration_time": "0.032000" },
+            { "size": "1000", "duration_time": "0.036000" }
+        ] }"#;
+
+        assert_eq!(parse_bit_rate(json).unwrap(), Some(240_000));
+    }
+
+    #[test]
+    fn measures_no_bit_rate_without_packet_durations() {
+        let json = br#"{ "packets": [ { "size": "1000", "duration_time": "N/A" } ] }"#;
+
+        assert_eq!(parse_bit_rate(json).unwrap(), None);
     }
 
     #[test]

@@ -1,0 +1,11 @@
+---
+source: tests/dialogue_separation.rs
+expression: "workspace.vt(&[\"stereo-tone.m4a\", \"--keep\", \"voice\"])"
+---
+exit: 0
+
+stdout:
+Kept the voice in stereo-tone.voice.wav.
+Separated with the fake backend on cpu in [elapsed] s.
+
+stderr:

@@ -1,0 +1,11 @@
+---
+source: tests/dialogue_separation.rs
+expression: "workspace.vt(&[\"clean-cfr.mp4\", \"--keep\", \"voice\"])"
+---
+exit: 0
+
+stdout:
+Kept the voice in clean-cfr.voice.mp4.
+Separated with the fake backend on cpu in [elapsed] s.
+
+stderr:

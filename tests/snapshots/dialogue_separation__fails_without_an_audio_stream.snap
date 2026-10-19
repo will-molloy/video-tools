@@ -1,0 +1,10 @@
+---
+source: tests/dialogue_separation.rs
+expression: "workspace.vt(&[\"chapters-valid.mkv\", \"--keep\", \"voice\"])"
+---
+exit: 2
+
+stdout:
+
+stderr:
+Error: no audio stream
