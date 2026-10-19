@@ -152,29 +152,29 @@ fn estimate_packets(stream: &ffprobe::Stream, duration: Duration) -> u64 {
         .unwrap_or((per_sec * duration.as_secs_f64()) as u64)
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug)]
 pub struct Report {
-    pub video: VideoSummary,
-    pub audio: Vec<AudioSummary>,
+    video: VideoSummary,
+    audio: Vec<AudioSummary>,
     pub findings: Vec<Finding>,
 }
 
-#[derive(Debug, Clone, PartialEq)]
-pub struct VideoSummary {
-    pub index: usize,
-    pub codec: String,
-    pub frame_rate: Ratio,
-    pub packets: usize,
-    pub span: Option<Span>,
+#[derive(Debug)]
+struct VideoSummary {
+    index: usize,
+    codec: String,
+    frame_rate: Ratio,
+    packets: usize,
+    span: Option<Span>,
 }
 
-#[derive(Debug, Clone, PartialEq)]
-pub struct AudioSummary {
-    pub index: usize,
-    pub codec: String,
-    pub sample_rate: u32,
-    pub packets: usize,
-    pub span: Option<Span>,
+#[derive(Debug)]
+struct AudioSummary {
+    index: usize,
+    codec: String,
+    sample_rate: u32,
+    packets: usize,
+    span: Option<Span>,
 }
 
 impl Report {

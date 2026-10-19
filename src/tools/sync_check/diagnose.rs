@@ -200,7 +200,7 @@ impl Nanos {
         (self.0 + 500_000).div_euclid(1_000_000)
     }
 
-    pub fn as_secs_f64(self) -> f64 {
+    fn as_secs_f64(self) -> f64 {
         // Precision loss only matters beyond 104 days.
         #[allow(clippy::cast_precision_loss)]
         let nanos = self.0 as f64;
