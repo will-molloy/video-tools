@@ -1,9 +1,10 @@
 //! Caches separated stems, so separating a file again skips inference.
 //!
 //! Entries live in `~/.cache/video-tools/dialogue-separation/<key>/` (or under
-//! `$XDG_CACHE_HOME`). The key covers the backend, the file's size and mtime, and a hash of its
-//! first and last MiB. Hashing whole recordings would take minutes, and an edit that keeps the
-//! size and mtime and touches neither end is not a realistic way for a video to change.
+//! `$XDG_CACHE_HOME`). The key covers the backend, the speech spans, the file's size and mtime,
+//! and a hash of its first and last MiB. Hashing whole recordings would take minutes, and an
+//! edit that keeps the size and mtime and touches neither end is not a realistic way for a video
+//! to change. The spans put an edited transcript in a new entry.
 //!
 //! A run writes into a scratch directory and renames it into place when it finishes, so an entry
 //! is either complete or absent.
@@ -17,14 +18,14 @@ use std::{
 
 use anyhow::{Context, Result};
 
-use super::Backend;
+use super::{Backend, speech::Span};
 use crate::ml::{
     protocol::Stats,
     scratch::{self, Scratch},
 };
 
 /// Bump when the Python stage's output changes, so stale stems aren't reused.
-const FORMAT: u32 = 1;
+const FORMAT: u32 = 2;
 
 const SAMPLE_BYTES: u64 = 1 << 20;
 
@@ -36,7 +37,7 @@ const STATS: &str = "stats.json";
 pub struct Key(String);
 
 impl Key {
-    pub fn of(path: &Path, backend: Backend) -> Result<Key> {
+    pub fn of(path: &Path, backend: Backend, spans: &[Span]) -> Result<Key> {
         let mut file =
             File::open(path).with_context(|| format!("failed to open {}", path.display()))?;
         let meta = file.metadata().context("failed to read file metadata")?;
@@ -52,12 +53,24 @@ impl Key {
         let mut tail = Vec::new();
         file.seek(SeekFrom::Start(size.saturating_sub(SAMPLE_BYTES)))?;
         file.take(SAMPLE_BYTES).read_to_end(&mut tail)?;
-        Ok(Key::from_parts(backend, size, mtime, &head, &tail))
+        Ok(Key::from_parts(backend, spans, size, mtime, &head, &tail))
     }
 
-    fn from_parts(backend: Backend, size: u64, mtime_ns: u128, head: &[u8], tail: &[u8]) -> Key {
+    fn from_parts(
+        backend: Backend,
+        spans: &[Span],
+        size: u64,
+        mtime_ns: u128,
+        head: &[u8],
+        tail: &[u8],
+    ) -> Key {
         let mut hasher = blake3::Hasher::new();
         hasher.update(&FORMAT.to_le_bytes());
+        hasher.update(&(spans.len() as u64).to_le_bytes());
+        for span in spans {
+            hasher.update(&span.start.as_nanos().to_le_bytes());
+            hasher.update(&span.end.as_nanos().to_le_bytes());
+        }
         hasher.update(&size.to_le_bytes());
         hasher.update(&mtime_ns.to_le_bytes());
         // Length prefixes keep the head/tail boundary unambiguous for files under 2 MiB.
@@ -143,12 +156,16 @@ impl Pending {
 
 #[cfg(test)]
 mod tests {
-    use std::{fs::OpenOptions, io::Write, time::SystemTime};
+    use std::{
+        fs::OpenOptions,
+        io::Write,
+        time::{Duration, SystemTime},
+    };
 
     use super::*;
 
     fn key(path: &Path) -> Key {
-        Key::of(path, Backend::Sam).unwrap()
+        Key::of(path, Backend::Sam, &[]).unwrap()
     }
 
     /// Overwrites one byte, then restores the mtime, like an edit that slips past it.
@@ -169,7 +186,7 @@ mod tests {
 
     #[test]
     fn keys_are_prefixed_with_the_backend() {
-        let key = Key::from_parts(Backend::Tiger, 1, 2, b"head", b"tail");
+        let key = Key::from_parts(Backend::Tiger, &[], 1, 2, b"head", b"tail");
 
         assert_eq!(key.0.split_once('-').unwrap().0, "tiger");
         assert_eq!(key.0.len(), "tiger-".len() + 32);
@@ -178,9 +195,22 @@ mod tests {
     #[test]
     fn keys_differ_by_backend() {
         assert_ne!(
-            Key::from_parts(Backend::Sam, 1, 2, b"head", b"tail"),
-            Key::from_parts(Backend::Tiger, 1, 2, b"head", b"tail")
+            Key::from_parts(Backend::Sam, &[], 1, 2, b"head", b"tail"),
+            Key::from_parts(Backend::Tiger, &[], 1, 2, b"head", b"tail")
         );
+    }
+
+    #[test]
+    fn keys_change_with_the_spans() {
+        let span = |start_s, end_s| Span {
+            start: Duration::from_secs(start_s),
+            end: Duration::from_secs(end_s),
+        };
+        let key = |spans: &[Span]| Key::from_parts(Backend::Tiger, spans, 1, 2, b"head", b"tail");
+
+        assert_ne!(key(&[span(1, 2)]), key(&[span(1, 3)]));
+        assert_ne!(key(&[span(1, 2)]), key(&[]));
+        assert_ne!(key(&[span(1, 2), span(3, 4)]), key(&[span(1, 4)]));
     }
 
     #[test]
@@ -257,7 +287,7 @@ mod tests {
         let cache = Cache {
             root: root.path().into(),
         };
-        let key = Key::from_parts(Backend::Fake, 1, 2, b"", b"");
+        let key = Key::from_parts(Backend::Fake, &[], 1, 2, b"", b"");
         let pending = cache.begin(&key).unwrap();
         for name in [VOICE, AMBIENCE, "input.wav"] {
             fs::write(pending.dir().join(name), name).unwrap();
@@ -281,7 +311,7 @@ mod tests {
         let cache = Cache {
             root: root.path().into(),
         };
-        let key = Key::from_parts(Backend::Fake, 1, 2, b"", b"");
+        let key = Key::from_parts(Backend::Fake, &[], 1, 2, b"", b"");
 
         let pending = cache.begin(&key).unwrap();
         fs::write(pending.dir().join(VOICE), "partial").unwrap();

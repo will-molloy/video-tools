@@ -7,5 +7,6 @@ exit: 0
 stdout:
 Kept the voice in clean-cfr.voice.mkv.
 Separated with the fake backend on cpu in [elapsed] s.
+1 speech interval, 10.0 s in all.
 
 stderr:
