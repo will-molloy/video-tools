@@ -23,7 +23,7 @@ pub fn cache_dir(tool: &str) -> Result<PathBuf> {
     Ok(base.join("video-tools").join(tool))
 }
 
-/// A directory that's removed when dropped, unless [`Scratch::persist`] moved it.
+/// A directory that's removed when dropped.
 #[derive(Debug)]
 pub struct Scratch {
     dir: PathBuf,
@@ -46,21 +46,10 @@ impl Scratch {
     pub fn dir(&self) -> &Path {
         &self.dir
     }
-
-    /// Renames the directory to `target` in one step, unless `target` exists. Another run may
-    /// have made `target` first, in which case this one is removed.
-    pub fn persist(self, target: &Path) -> Result<()> {
-        if !target.exists() {
-            fs::rename(&self.dir, target)
-                .with_context(|| format!("failed to move {} into place", self.dir.display()))?;
-        }
-        Ok(())
-    }
 }
 
 impl Drop for Scratch {
     fn drop(&mut self) {
-        // Gone already after `persist` moved it.
         let _ = fs::remove_dir_all(&self.dir);
     }
 }
@@ -95,40 +84,6 @@ mod tests {
         drop(scratch);
 
         assert_eq!(fs::read_dir(root.path()).unwrap().count(), 0);
-    }
-
-    #[test]
-    fn persists_by_renaming() {
-        let root = tempfile::tempdir().unwrap();
-        let scratch = Scratch::new(root.path(), "run").unwrap();
-        fs::write(scratch.dir().join("voice.wav"), "voice").unwrap();
-        let target = root.path().join("done");
-
-        scratch.persist(&target).unwrap();
-
-        assert_eq!(
-            fs::read_to_string(target.join("voice.wav")).unwrap(),
-            "voice"
-        );
-        assert_eq!(fs::read_dir(root.path()).unwrap().count(), 1);
-    }
-
-    #[test]
-    fn keeps_an_existing_target_and_drops_the_duplicate() {
-        let root = tempfile::tempdir().unwrap();
-        let target = root.path().join("done");
-        fs::create_dir(&target).unwrap();
-        fs::write(target.join("voice.wav"), "first").unwrap();
-        let scratch = Scratch::new(root.path(), "run").unwrap();
-        fs::write(scratch.dir().join("voice.wav"), "second").unwrap();
-
-        scratch.persist(&target).unwrap();
-
-        assert_eq!(
-            fs::read_to_string(target.join("voice.wav")).unwrap(),
-            "first"
-        );
-        assert_eq!(fs::read_dir(root.path()).unwrap().count(), 1);
     }
 
     #[test]
