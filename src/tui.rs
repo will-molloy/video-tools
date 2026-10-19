@@ -23,7 +23,10 @@ use tokio::{
     task::JoinHandle,
 };
 
-use crate::tools::Tool;
+use crate::tools::{
+    Tool,
+    chapters::{self, Outcome},
+};
 
 const VIDEO_EXTENSIONS: &[&str] = &[
     "avi", "flv", "m2ts", "m4v", "mkv", "mov", "mp4", "mts", "ts", "webm", "wmv",
@@ -289,8 +292,31 @@ fn spawn_tool(tool: Tool, file: PathBuf, tx: UnboundedSender<ToolOutput>) -> Joi
     })
 }
 
-async fn run_tool(tool: Tool, _file: &Path) -> Result<ToolOutput> {
-    match tool {}
+async fn run_tool(tool: Tool, file: &Path) -> Result<ToolOutput> {
+    match tool {
+        Tool::Chapters => chapters::run(file).await.map(|o| chapters_lines(file, o)),
+    }
+}
+
+fn chapters_lines(file: &Path, outcome: Outcome) -> ToolOutput {
+    match outcome {
+        Outcome::NoChapters => {
+            vec![Line::from(format!("{} has no chapters.", file_name(file))).yellow()]
+        }
+        Outcome::Chapters(report) => {
+            let mut lines: Vec<Line> = report.lines().map(Line::from).collect();
+            if !report.violations.is_empty() {
+                lines.push(Line::default());
+                lines.extend(
+                    report
+                        .violations
+                        .iter()
+                        .map(|v| Line::from(format!("warning: {v}")).yellow()),
+                );
+            }
+            lines
+        }
+    }
 }
 
 const HEADER_LOGO: &str = " vt ";
