@@ -1,4 +1,5 @@
 pub mod chapters;
+pub mod sync_check;
 
 /// Tools the TUI offers for a picked file. Each maps to a CLI subcommand.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
