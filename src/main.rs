@@ -9,7 +9,7 @@ use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
 
-use tools::{chapters::ChaptersArgs, sync_check::SyncCheckArgs, transcribe::TranscribeArgs};
+use tools::{Tool, chapters::ChaptersArgs, sync_check::SyncCheckArgs, transcribe::TranscribeArgs};
 
 /// Video processing toolbox. Run without a subcommand to open the TUI.
 #[derive(Debug, Parser)]
@@ -21,13 +21,13 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
-    /// Print chapters as a YouTube description chapter list
+    #[command(about = Tool::Chapters.summary())]
     Chapters(ChaptersArgs),
 
-    /// Diagnose audio/video sync problems and recommend a fix
+    #[command(about = Tool::SyncCheck.summary())]
     SyncCheck(SyncCheckArgs),
 
-    /// Extract dialogue to .srt file
+    #[command(about = Tool::Transcribe.summary())]
     Transcribe(TranscribeArgs),
 }
 

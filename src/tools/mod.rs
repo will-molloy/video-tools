@@ -39,7 +39,8 @@ pub fn suggest_force(e: anyhow::Error) -> anyhow::Error {
     }
 }
 
-/// Tools the TUI offers for a picked file. Each maps to a CLI subcommand.
+/// Tools the TUI offers for a picked file. Each maps to a CLI subcommand, and `summary` is also
+/// its CLI help and its README description.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Tool {
     Chapters,
