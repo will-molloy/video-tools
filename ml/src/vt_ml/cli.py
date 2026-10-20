@@ -43,7 +43,8 @@ def _on_sigterm(signum, frame) -> NoReturn:
 
 def main(argv: list[str] | None = None, stages: Mapping[str, Stage] = STAGES) -> NoReturn:
     protocol = claim_stdout()
-    logging.basicConfig(stream=sys.stderr, level=logging.INFO, format="%(name)s: %(message)s")
+    logging.basicConfig(stream=sys.stderr, level=logging.WARNING, format="%(name)s: %(message)s")
+    log.setLevel(logging.INFO)
     signal.signal(signal.SIGTERM, _on_sigterm)
     sys.exit(run(protocol, argv, stages))
 

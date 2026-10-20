@@ -452,13 +452,21 @@ fn spawn_tool(
             Ok(lines) => Finished::Output(lines),
             Err(e) => match e.downcast::<tools::Exists>() {
                 Ok(tools::Exists(output)) => Finished::Exists(output),
-                Err(e) => Finished::Output(vec![Line::from(format!("Error: {e:#}")).red()]),
+                Err(e) => Finished::Output(error_lines(&format!("Error: {e:#}"))),
             },
         };
 
         // Fails only if the TUI has exited, in which case nobody needs the result.
         let _ = tx.send((run, finished));
     });
+}
+
+/// An error's message in red, then any detail below it, such as a stage's stderr, in gray.
+fn error_lines(error: &str) -> ToolOutput {
+    let mut lines = error.lines().map(|line| Line::from(line.to_string()));
+    let mut output: ToolOutput = lines.next().map(Line::red).into_iter().collect();
+    output.extend(lines.map(Line::dark_gray));
+    output
 }
 
 async fn run_tool(
