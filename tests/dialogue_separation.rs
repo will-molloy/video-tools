@@ -390,9 +390,23 @@ fn separates_again_after_the_file_changes() {
     )
     .unwrap();
 
-    assert_snapshot!(workspace.vt(&["clean-cfr.mp4", "--keep", "voice"]));
+    assert_snapshot!(workspace.vt(&["clean-cfr.mp4", "--keep", "voice", "--force"]));
 
     assert_eq!(workspace.cache_entries().len(), 2);
+}
+
+#[test]
+fn keeps_an_existing_output() {
+    let workspace = Workspace::transcribed("clean-cfr.mp4");
+    fs::write(workspace.path("clean-cfr.voice.mp4"), "mine").unwrap();
+
+    assert_snapshot!(workspace.vt(&["clean-cfr.mp4", "--keep", "voice"]));
+
+    assert_eq!(
+        fs::read_to_string(workspace.path("clean-cfr.voice.mp4")).unwrap(),
+        "mine"
+    );
+    assert_eq!(workspace.cache_entries(), Vec::<String>::new());
 }
 
 /// PIDs of processes whose command line mentions `needle`.
@@ -535,7 +549,7 @@ fn separates_again_after_the_transcript_changes() {
          2\n00:00:03,500 --> 00:00:04,500\nmumbling\n\n",
     );
 
-    assert_snapshot!(workspace.vt(&["speech-bursts.mkv", "--keep", "voice"]));
+    assert_snapshot!(workspace.vt(&["speech-bursts.mkv", "--keep", "voice", "--force"]));
 
     assert_eq!(workspace.cache_entries().len(), 2);
 }
