@@ -58,6 +58,16 @@ generate() {
 
     # Runs past an hour, so timestamps switch to H:MM:SS.
     chaptered chapters-hours.mkv 3660 "0 1800 First half" "1800 3600 Second half" "3600 3660 Credits"
+
+    speech_bursts
+}
+
+# Tone bursts at 1-2 s and 3.5-4.5 s in 6 s of silence, which the fake transcriber reads as two
+# lines of speech. Lossless audio at the transcriber's 16 kHz keeps the edges exact.
+speech_bursts() {
+    ffmpeg -v error -y -f lavfi -i "color=black:size=32x32:rate=1:duration=6" \
+        -f lavfi -i "aevalsrc=0.5*sin(2*PI*440*t)*(gte(t\,1)*lt(t\,2)+gte(t\,3.5)*lt(t\,4.5)):s=16000:d=6" \
+        -c:v libx264 -preset veryfast -c:a flac -map_metadata -1 -fflags +bitexact speech-bursts.mkv
 }
 
 # Encodes a tiny, blank, silent video lasting $2 seconds into $1, with chapters given as
@@ -97,6 +107,15 @@ timeline() {
         awk -F, '$3 !~ /D/ { print $1, $2 }' | sort -n |
         awk 'NR > 1 { deltas = deltas " " ($1 - prev) } { prev = $1; last = $1 + $2; if (NR == 1) first = $1 }
              END { print NR, first, last deltas }'
+}
+
+# Prints the stretches where the first audio stream is louder than -40 dBFS, as "START-END"
+# in seconds.
+loud_stretches() {
+    ffmpeg -v info -nostats -i "$1" -map 0:a:0 -af silencedetect=noise=-40dB:d=0.1 -f null - 2>&1 |
+        awk '/silence_start/ && $5 > 0 { out = out sep sprintf("%.3f-%.3f", start, $5); sep = " " }
+             /silence_end/ { start = $5 }
+             END { print out }'
 }
 
 time_base_den() {
@@ -204,6 +223,11 @@ check() {
         "3660s: 0-1800 First half; 1800-3600 Second half; 3600-3660 Credits"
     # The chapters tests use this as their file without chapters.
     expect clean-cfr.mp4 chapters "$(chapter_list clean-cfr.mp4)" "10s:"
+
+    file=speech-bursts.mkv
+    expect "$file" "audio" "$(ffprobe -v error -of csv=p=0 -select_streams a \
+        -show_entries stream=codec_name,sample_rate,channels "$file")" "flac,16000,1"
+    expect "$file" "loud stretches" "$(loud_stretches "$file")" "1.000-2.000 3.500-4.500"
 
     if ((failures > 0)); then
         echo "$failures fixture check(s) failed" >&2

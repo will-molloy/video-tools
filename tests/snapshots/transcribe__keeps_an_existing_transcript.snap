@@ -1,0 +1,10 @@
+---
+source: tests/transcribe.rs
+expression: "workspace.vt(&[\"speech-bursts.mkv\"])"
+---
+exit: 2
+
+stdout:
+
+stderr:
+Error: "speech-bursts.srt" already exists; pass --force to replace it

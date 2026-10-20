@@ -5,7 +5,10 @@ use std::{fmt, iter, path::Path, path::PathBuf, process::ExitCode};
 use anyhow::Result;
 use clap::Args;
 
-use crate::ffprobe;
+use crate::{
+    ffprobe,
+    quote::{plain, quote},
+};
 
 /// YouTube ignores chapters shorter than this.
 const MIN_CHAPTER_SECS: u64 = 10;
@@ -22,7 +25,7 @@ pub struct ChaptersArgs {
 pub async fn cli(args: &ChaptersArgs) -> Result<ExitCode> {
     match run(&args.file).await? {
         Outcome::NoChapters => {
-            eprintln!("{} has no chapters", args.file.display());
+            eprintln!("{} has no chapters", plain(&quote(&args.file)));
             Ok(ExitCode::FAILURE)
         }
         Outcome::Chapters(report) => {

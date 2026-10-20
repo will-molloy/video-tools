@@ -4,7 +4,12 @@
 //! go to the whole group. Otherwise SIGKILL, which uv can't forward, would orphan Python, and a
 //! terminal's Ctrl-C would reach Python directly instead of through `vt`'s cancellation.
 
-use std::{collections::VecDeque, process::Stdio, time::Duration};
+use std::{
+    collections::VecDeque,
+    os::unix::process::ExitStatusExt,
+    process::{ExitStatus, Stdio},
+    time::Duration,
+};
 
 use anyhow::{Context, Result, bail};
 use nix::{
@@ -61,7 +66,7 @@ pub async fn run<R: DeserializeOwned>(
             if tail.len() == STDERR_TAIL {
                 tail.pop_front();
             }
-            tail.push_back(line);
+            tail.push_back(last_redraw(&line).to_string());
         }
         tail
     });
@@ -103,13 +108,29 @@ pub async fn run<R: DeserializeOwned>(
         Some(done) if status.success() => Ok(done),
         Some(_) => bail!("vt-ml reported success but exited with {status}"),
         None => {
-            let tail: Vec<_> = tail.into();
-            bail!(
-                "vt-ml exited with {status} before finishing:\n{}",
-                tail.join("\n")
-            )
+            let tail = Vec::from(tail).join("\n");
+            if killed(status) {
+                bail!(
+                    "vt-ml was killed before finishing ({status}), probably for running out of \
+                     memory:\n{tail}"
+                )
+            }
+            bail!("vt-ml exited with {status} before finishing:\n{tail}")
         }
     }
+}
+
+/// What a progress bar shows last, since it redraws itself in place with `\r`.
+fn last_redraw(line: &str) -> &str {
+    line.trim_end_matches('\r')
+        .rsplit('\r')
+        .next()
+        .unwrap_or_default()
+}
+
+/// Whether SIGKILL ended the stage. uv reports its Python child's SIGKILL as exit code 137.
+fn killed(status: ExitStatus) -> bool {
+    status.signal() == Some(Signal::SIGKILL as i32) || status.code() == Some(128 + 9)
 }
 
 /// The stage's process group, which shares its leader's pid.
@@ -245,12 +266,38 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn reports_a_child_that_dies_from_a_signal() {
+    async fn keeps_the_last_redraw_of_a_progress_bar() {
+        let script = r"printf 'Loading:   0%%\rLoading:  50%%\rLoading: 100%%\r\n' >&2
+                       echo 'Killed' >&2
+                       exit 1";
+
+        let (result, _) = run_sh(script).await;
+
+        assert_eq!(
+            result.unwrap_err().to_string(),
+            "vt-ml exited with exit status: 1 before finishing:\nLoading: 100%\nKilled"
+        );
+    }
+
+    #[tokio::test]
+    async fn suspects_running_out_of_memory_when_killed() {
         let (result, _) = run_sh("kill -KILL $$").await;
 
         assert_eq!(
             result.unwrap_err().to_string(),
-            "vt-ml exited with signal: 9 (SIGKILL) before finishing:\n"
+            "vt-ml was killed before finishing (signal: 9 (SIGKILL)), probably for running out \
+             of memory:\n"
+        );
+    }
+
+    #[tokio::test]
+    async fn suspects_running_out_of_memory_when_uv_reports_a_kill() {
+        let (result, _) = run_sh("exit 137").await;
+
+        assert_eq!(
+            result.unwrap_err().to_string(),
+            "vt-ml was killed before finishing (exit status: 137), probably for running out of \
+             memory:\n"
         );
     }
 

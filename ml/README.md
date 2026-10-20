@@ -56,6 +56,22 @@ Human-readable logs and tracebacks. `vt` shows the last lines when a stage fails
 Stages check for SIGTERM between chunks, so stopping can take one chunk's inference.
 `vt` signals the whole process group and sends SIGKILL after 30 s.
 
+## Stages
+
+### `transcribe`
+
+```sh
+vt-ml transcribe --input IN.wav --backend whisper|fake --device cuda|cpu
+```
+
+- `--input` is a mono float WAV at 16 kHz
+- `whisper` runs [large-v3-turbo](https://huggingface.co/openai/whisper-large-v3-turbo) on `cuda`, from the `whisper` extra
+- `fake` runs on `cpu` and needs no extras
+- `progress` counts milliseconds of audio read
+- `done` adds `segments`, a list of `{"start", "end", "text"}` in seconds
+- Segments are trimmed to their words' timestamps
+- `fake` makes a segment of `speech` from each stretch louder than -26 dBFS RMS, in 10 ms frames; `VT_ML_FAKE_DELAY_S` slows its progress for cancel tests
+
 ## GPUs
 
 - The `rocm` and `cuda` extras conflict, and each pulls torch from its own PyTorch index
