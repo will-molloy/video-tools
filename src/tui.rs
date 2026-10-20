@@ -31,7 +31,7 @@ use tokio_util::sync::CancellationToken;
 use crate::{
     ffprobe::Cancelled,
     tools::{
-        Tool,
+        self, Tool,
         chapters::{self, Outcome},
         sync_check::{self, Report, diagnose::Severity, thousands},
         transcribe,
@@ -61,6 +61,15 @@ pub async fn run() -> Result<()> {
 
 type ToolOutput = Vec<Line<'static>>;
 
+/// How a tool run ended.
+#[derive(Debug)]
+enum Finished {
+    Output(ToolOutput),
+
+    /// The tool stopped before replacing this file.
+    Exists(PathBuf),
+}
+
 /// The latest progress report from whichever tool is running.
 #[derive(Debug, Clone, PartialEq)]
 enum Progress {
@@ -81,7 +90,7 @@ struct App {
 
     screen: Screen,
     next_run: u64,
-    results_tx: UnboundedSender<(RunId, ToolOutput)>,
+    results_tx: UnboundedSender<(RunId, Finished)>,
 
     /// Set by Ctrl-C while a tool runs. The TUI exits once the tool has cleaned up.
     quitting: bool,
@@ -106,6 +115,11 @@ enum Screen {
         /// Holds the latest report only, so the tool never waits on the UI.
         progress: watch::Receiver<Option<Progress>>,
     },
+    ConfirmOverwrite {
+        file: PathBuf,
+        tool: Tool,
+        output: PathBuf,
+    },
     Output {
         file: PathBuf,
         tool: Tool,
@@ -123,7 +137,7 @@ impl App {
     fn new(
         dir: PathBuf,
         files: Vec<PathBuf>,
-        results_tx: UnboundedSender<(RunId, ToolOutput)>,
+        results_tx: UnboundedSender<(RunId, Finished)>,
     ) -> Self {
         App {
             file_list: ListState::default().with_selected(first_index(&files)),
@@ -139,7 +153,7 @@ impl App {
     async fn run(
         mut self,
         terminal: &mut DefaultTerminal,
-        mut results_rx: UnboundedReceiver<(RunId, ToolOutput)>,
+        mut results_rx: UnboundedReceiver<(RunId, Finished)>,
     ) -> Result<()> {
         let mut events = EventStream::new();
         let mut redraw = time::interval(PROGRESS_REDRAW);
@@ -158,8 +172,8 @@ impl App {
                         return Ok(());
                     }
                 }
-                Some((run, lines)) = results_rx.recv() => {
-                    if self.on_result(run, lines).is_break() {
+                Some((run, finished)) = results_rx.recv() => {
+                    if self.on_result(run, finished).is_break() {
                         return Ok(());
                     }
                 }
@@ -200,32 +214,29 @@ impl App {
                     navigate(list, key.code);
                     let selected = list.selected().and_then(|i| Tool::ALL.get(i));
                     match (key.code, selected) {
-                        (KeyCode::Enter, Some(&tool)) => {
-                            let run = RunId(self.next_run);
-                            self.next_run += 1;
-                            let cancel = CancellationToken::new();
-                            let (progress_tx, progress) = watch::channel(None);
-                            spawn_tool(
-                                tool,
-                                file.clone(),
-                                run,
-                                cancel.clone(),
-                                progress_tx,
-                                self.results_tx.clone(),
-                            );
-                            Some(Screen::Running {
-                                file: file.clone(),
-                                tool,
-                                run,
-                                cancel,
-                                cancelling: false,
-                                progress,
-                            })
-                        }
+                        (KeyCode::Enter, Some(&tool)) => Some(start(
+                            &mut self.next_run,
+                            &self.results_tx,
+                            file.clone(),
+                            tool,
+                            false,
+                        )),
                         _ => None,
                     }
                 }
             }
+            Screen::ConfirmOverwrite { file, tool, .. } => match key.code {
+                KeyCode::Char('y') => Some(start(
+                    &mut self.next_run,
+                    &self.results_tx,
+                    file.clone(),
+                    *tool,
+                    true,
+                )),
+                KeyCode::Char('n') => Some(tool_picker(file.clone(), *tool)),
+                _ if back => Some(tool_picker(file.clone(), *tool)),
+                _ => None,
+            },
             Screen::Running {
                 cancel, cancelling, ..
             } => {
@@ -271,7 +282,7 @@ impl App {
         ControlFlow::Continue(())
     }
 
-    fn on_result(&mut self, run: RunId, lines: ToolOutput) -> ControlFlow<()> {
+    fn on_result(&mut self, run: RunId, finished: Finished) -> ControlFlow<()> {
         if let Screen::Running {
             file,
             tool,
@@ -284,16 +295,20 @@ impl App {
             if self.quitting {
                 return ControlFlow::Break(());
             }
-            self.screen = if *cancelling {
-                tool_picker(file.clone(), *tool)
-            } else {
-                Screen::Output {
+            self.screen = match finished {
+                _ if *cancelling => tool_picker(file.clone(), *tool),
+                Finished::Output(lines) => Screen::Output {
                     file: file.clone(),
                     tool: *tool,
                     lines,
                     scroll: 0,
                     viewport: 0,
-                }
+                },
+                Finished::Exists(output) => Screen::ConfirmOverwrite {
+                    file: file.clone(),
+                    tool: *tool,
+                    output,
+                },
             };
         }
         ControlFlow::Continue(())
@@ -314,7 +329,9 @@ impl App {
                 vec![truncate_left(&tilde(&self.dir), width)]
             }
             Screen::PickTool { file, .. } => vec![file_name(file)],
-            Screen::Running { file, tool, .. } | Screen::Output { file, tool, .. } => {
+            Screen::Running { file, tool, .. }
+            | Screen::ConfirmOverwrite { file, tool, .. }
+            | Screen::Output { file, tool, .. } => {
                 vec![file_name(file), tool.name().to_string()]
             }
         };
@@ -344,6 +361,12 @@ impl App {
                     "Esc cancel"
                 }
             }
+            Screen::ConfirmOverwrite { tool, output, .. } => {
+                let question = format!("{}. Overwrite it?", tools::Exists(output.clone()));
+                let paragraph = Paragraph::new(question).wrap(Wrap { trim: true });
+                frame.render_widget(paragraph.yellow().block(panel(tool.name())), body);
+                "y overwrite · n back"
+            }
             Screen::Output {
                 tool,
                 lines,
@@ -356,6 +379,38 @@ impl App {
             }
         };
         frame.render_widget(Line::from(hints).dark_gray(), footer);
+    }
+}
+
+/// Starts `tool` on `file` and returns the screen that tracks it. `force` lets the tool replace
+/// its existing output.
+fn start(
+    next_run: &mut u64,
+    results_tx: &UnboundedSender<(RunId, Finished)>,
+    file: PathBuf,
+    tool: Tool,
+    force: bool,
+) -> Screen {
+    let run = RunId(*next_run);
+    *next_run += 1;
+    let cancel = CancellationToken::new();
+    let (progress_tx, progress) = watch::channel(None);
+    spawn_tool(
+        tool,
+        file.clone(),
+        force,
+        run,
+        cancel.clone(),
+        progress_tx,
+        results_tx.clone(),
+    );
+    Screen::Running {
+        file,
+        tool,
+        run,
+        cancel,
+        cancelling: false,
+        progress,
     }
 }
 
@@ -386,24 +441,30 @@ fn navigate(list: &mut ListState, code: KeyCode) {
 fn spawn_tool(
     tool: Tool,
     file: PathBuf,
+    force: bool,
     run: RunId,
     cancel: CancellationToken,
     progress: watch::Sender<Option<Progress>>,
-    tx: UnboundedSender<(RunId, ToolOutput)>,
+    tx: UnboundedSender<(RunId, Finished)>,
 ) {
     tokio::spawn(async move {
-        let lines = run_tool(tool, &file, &cancel, &progress)
-            .await
-            .unwrap_or_else(|e| vec![Line::from(format!("Error: {e:#}")).red()]);
+        let finished = match run_tool(tool, &file, force, &cancel, &progress).await {
+            Ok(lines) => Finished::Output(lines),
+            Err(e) => match e.downcast::<tools::Exists>() {
+                Ok(tools::Exists(output)) => Finished::Exists(output),
+                Err(e) => Finished::Output(vec![Line::from(format!("Error: {e:#}")).red()]),
+            },
+        };
 
         // Fails only if the TUI has exited, in which case nobody needs the result.
-        let _ = tx.send((run, lines));
+        let _ = tx.send((run, finished));
     });
 }
 
 async fn run_tool(
     tool: Tool,
     file: &Path,
+    force: bool,
     cancel: &CancellationToken,
     progress: &watch::Sender<Option<Progress>>,
 ) -> Result<ToolOutput> {
@@ -421,18 +482,11 @@ async fn run_tool(
         .await
         .map(|report| sync_check_lines(&report)),
         Tool::Transcribe => {
-            let run = transcribe::run(file, transcribe::Backend::Whisper, false, cancel, |p| {
+            transcribe::run(file, transcribe::Backend::Whisper, force, cancel, |p| {
                 progress.send_replace(Some(Progress::Transcription(p)));
-            });
-            match run.await {
-                Ok(outcome) => Ok(outcome.lines().into_iter().map(Line::from).collect()),
-                Err(e) => match e.downcast::<transcribe::Exists>() {
-                    Ok(exists) => Ok(vec![
-                        Line::from(format!("{exists}. Delete it to transcribe again.")).yellow(),
-                    ]),
-                    Err(e) => Err(e),
-                },
-            }
+            })
+            .await
+            .map(|outcome| outcome.lines().into_iter().map(Line::from).collect())
         }
     }
 }
@@ -707,11 +761,15 @@ mod tests {
         KeyEvent::new(code, modifiers)
     }
 
+    fn output(line: &str) -> Finished {
+        Finished::Output(vec![Line::from(line.to_string())])
+    }
+
     #[test]
     fn ignores_results_from_other_runs() {
         let mut app = running(Tool::SyncCheck, RunId(1), CancellationToken::new());
 
-        let _ = app.on_result(RunId(0), vec![Line::from("stale")]);
+        let _ = app.on_result(RunId(0), output("stale"));
 
         assert!(matches!(app.screen, Screen::Running { run: RunId(1), .. }));
     }
@@ -739,7 +797,7 @@ mod tests {
         let mut app = running(Tool::Transcribe, RunId(0), CancellationToken::new());
         let _ = app.on_key(key(KeyCode::Esc, KeyModifiers::NONE));
 
-        let flow = app.on_result(RunId(0), vec![Line::from("Error: cancelled")]);
+        let flow = app.on_result(RunId(0), output("Error: cancelled"));
 
         assert!(flow.is_continue());
         let Screen::PickTool { list, .. } = &app.screen else {
@@ -757,12 +815,57 @@ mod tests {
         let mut app = running(Tool::Transcribe, RunId(0), cancel.clone());
 
         let on_key = app.on_key(key(KeyCode::Char('c'), KeyModifiers::CONTROL));
-        let on_result = app.on_result(RunId(0), vec![Line::from("Error: cancelled")]);
+        let on_result = app.on_result(RunId(0), output("Error: cancelled"));
 
         assert_eq!(
             (on_key, cancel.is_cancelled(), on_result),
             (ControlFlow::Continue(()), true, ControlFlow::Break(()))
         );
+    }
+
+    fn confirming(app: &mut App) {
+        let _ = app.on_result(RunId(0), Finished::Exists("/videos/stream.srt".into()));
+    }
+
+    #[test]
+    fn asks_before_overwriting_an_existing_output() {
+        let mut app = running(Tool::Transcribe, RunId(0), CancellationToken::new());
+
+        confirming(&mut app);
+
+        let Screen::ConfirmOverwrite { tool, output, .. } = &app.screen else {
+            panic!("expected the overwrite confirmation");
+        };
+        assert_eq!(
+            (*tool, output.as_path()),
+            (Tool::Transcribe, Path::new("/videos/stream.srt"))
+        );
+    }
+
+    #[tokio::test]
+    async fn reruns_the_tool_once_overwriting_is_confirmed() {
+        let mut app = running(Tool::Transcribe, RunId(0), CancellationToken::new());
+        confirming(&mut app);
+
+        let _ = app.on_key(key(KeyCode::Char('y'), KeyModifiers::NONE));
+
+        assert!(matches!(
+            app.screen,
+            Screen::Running {
+                tool: Tool::Transcribe,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn returns_to_the_tool_when_overwriting_is_declined() {
+        let mut app = running(Tool::Transcribe, RunId(0), CancellationToken::new());
+        confirming(&mut app);
+
+        let _ = app.on_key(key(KeyCode::Char('n'), KeyModifiers::NONE));
+
+        assert!(matches!(app.screen, Screen::PickTool { .. }));
     }
 
     #[test]

@@ -2,8 +2,6 @@
 //!
 //! The pipeline extracts the first audio stream as mono 16 kHz, runs the `transcribe` stage in
 //! `ml/` (see its README for the contract), then writes one SRT block per segment of speech.
-//! The transcript is meant to be edited, so an existing one is kept unless the user forces a new
-//! one.
 
 use std::{
     fmt, fs,
@@ -12,7 +10,7 @@ use std::{
     time::Duration,
 };
 
-use anyhow::{Context, Result, anyhow};
+use anyhow::{Context, Result};
 use clap::{Args, ValueEnum};
 use serde::Deserialize;
 use tokio_util::sync::CancellationToken;
@@ -26,7 +24,7 @@ use crate::{
         scratch::{self, Scratch},
     },
     srt::{self, Block},
-    tools::sync_check::thousands,
+    tools::{self, sync_check::thousands},
 };
 
 /// Whisper's rate, which the stage requires.
@@ -93,26 +91,10 @@ pub async fn cli(args: &TranscribeArgs) -> Result<ExitCode> {
             ml::cli::show_progress(&progress);
         })
         .await
-        .map_err(|e| match e.downcast::<Exists>() {
-            Ok(exists) => anyhow!("{exists}; pass --force to replace it"),
-            Err(e) => e,
-        })
+        .map_err(tools::suggest_force)
     };
     ml::cli::run(&cancel, run, |outcome| outcome.lines()).await
 }
-
-/// The transcript [`run`] keeps unless forced, since it may hold the user's edits.
-#[derive(Debug)]
-pub struct Exists(PathBuf);
-
-impl fmt::Display for Exists {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let name = self.0.file_name().unwrap_or(self.0.as_os_str());
-        write!(f, "{} already exists", name.to_string_lossy())
-    }
-}
-
-impl std::error::Error for Exists {}
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Progress {
@@ -213,9 +195,7 @@ pub async fn run(
     mut on_progress: impl FnMut(Progress),
 ) -> Result<Outcome> {
     let output = path.with_extension("srt");
-    if !force && output.exists() {
-        return Err(Exists(output).into());
-    }
+    tools::check_output(&output, force)?;
     let info = ffprobe::streams(path).await?;
     let audio = info
         .streams
