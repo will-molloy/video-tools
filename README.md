@@ -33,11 +33,11 @@ Each tool can also be run directly from the CLI.
 
 ### Tools
 
-| Tool         | Description                        | Requirements                                                                                                                                                             |
-|--------------|------------------------------------|--------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| `chapters`   | YouTube description chapter list   | <ul><li>`ffprobe`</li></ul>                                                                                                                                              |
-| `sync-check` | Diagnose audio/video sync problems | <ul><li>`ffprobe`</li></ul>                                                                                                                                              |
-| `transcribe` | Extract dialogue to .srt file      | <ul><li>`ffmpeg`</li><li>`ffprobe`</li><li>`uv`</li><li>AMD (ROCm) or NVIDIA GPU ([Whisper](https://huggingface.co/openai/whisper-large-v3-turbo): 5 GB VRAM)</li></ul> |
+| Tool         | Description                        | Requirements                                                                                                                                                                                                         |
+|--------------|------------------------------------|----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `chapters`   | YouTube description chapter list   | <ul><li>`ffprobe`</li></ul>                                                                                                                                                                                          |
+| `sync-check` | Diagnose audio/video sync problems | <ul><li>`ffprobe`</li></ul>                                                                                                                                                                                          |
+| `transcribe` | Extract dialogue to .srt file      | <ul><li>`ffmpeg`</li><li>`ffprobe`</li><li>`uv`</li><li>AMD (ROCm) or NVIDIA GPU with ~5 GB VRAM</li><li>[Whisper](https://huggingface.co/openai/whisper-large-v3-turbo) (1.6 GB, downloaded on first run)</li></ul> |
 
 ## Contributing
 
