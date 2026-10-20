@@ -107,7 +107,7 @@ fn names(dir: &Path) -> Vec<String> {
 /// Masks elapsed times in snapshots taken while the guard lives, since they vary between runs.
 fn mask_elapsed() -> impl Drop {
     let mut settings = Settings::clone_current();
-    settings.add_filter(r"in \d+\.\d s\.", "in [elapsed] s.");
+    settings.add_filter(r"Duration: \d+\.\d s\.", "Duration: [elapsed] s.");
     settings.bind_to_scope()
 }
 

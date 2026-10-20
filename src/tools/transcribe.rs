@@ -173,9 +173,10 @@ impl Outcome {
             n => format!("Wrote {n} lines of speech to {file}."),
         }];
         lines.push(format!(
-            "Transcribed with {} on {device} in {elapsed_s:.1} s.",
+            "Transcribed with {} on {device}.",
             self.backend.label()
         ));
+        lines.push(format!("Duration: {elapsed_s:.1} s."));
         if let Some(mb) = peak_vram_mb {
             #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
             lines.push(format!("Peak VRAM: {} MB.", thousands(mb.round() as u64)));
@@ -335,7 +336,8 @@ mod tests {
             [
                 "Wrote 12 lines of speech to \"talk.srt\".",
                 "Transcribed with Whisper large-v3-turbo on cuda:0 (AMD Radeon RX 9070 XT, HIP \
-                 7.2) in 9.8 s.",
+                 7.2).",
+                "Duration: 9.8 s.",
                 "Peak VRAM: 4,752 MB.",
             ]
         );
