@@ -762,7 +762,7 @@ impl File<'_> {
 
     /// `text` styled as a file, for a path a tool's message names.
     fn style(text: &str) -> Span<'static> {
-        Span::from(text.to_string()).bold()
+        Span::from(text.to_string()).bold().fg(Color::Reset)
     }
 }
 
