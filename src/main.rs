@@ -33,7 +33,7 @@ enum Command {
     #[command(about = Tool::Transcribe.summary())]
     Transcribe(TranscribeArgs),
 
-    /// Separate dialogue from everything else and keep one side
+    #[command(about = Tool::DialogueSeparation.summary())]
     DialogueSeparation(DialogueSeparationArgs),
 }
 

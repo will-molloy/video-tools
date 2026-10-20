@@ -104,15 +104,17 @@ enum Screen {
         file: PathBuf,
         list: ListState,
     },
+    PickKeep {
+        file: PathBuf,
+        list: ListState,
+    },
     PickBackend {
         file: PathBuf,
-        tool: Tool,
         keep: Keep,
         list: ListState,
     },
     Running {
         file: PathBuf,
-        tool: Tool,
         job: Job,
         run: RunId,
         cancel: CancellationToken,
@@ -126,13 +128,11 @@ enum Screen {
     },
     ConfirmOverwrite {
         file: PathBuf,
-        tool: Tool,
         job: Job,
         output: PathBuf,
     },
     Output {
         file: PathBuf,
-        tool: Tool,
         job: Job,
         lines: ToolOutput,
 
@@ -232,32 +232,36 @@ impl App {
                                     &mut self.next_run,
                                     &self.results_tx,
                                     file.clone(),
-                                    tool,
                                     job,
                                     false,
                                 )
                             };
-                            let pick = |keep| backend_picker(file.clone(), tool, keep);
                             Some(match tool {
                                 Tool::Chapters => start(Job::Chapters),
                                 Tool::SyncCheck => start(Job::SyncCheck),
                                 Tool::Transcribe => start(Job::Transcribe),
-                                Tool::RemoveNoise => pick(Keep::Voice),
-                                Tool::RemoveVoice => pick(Keep::Ambience),
+                                Tool::DialogueSeparation => keep_picker(file.clone(), None),
                             })
                         }
                         _ => None,
                     }
                 }
             }
-            Screen::PickBackend {
-                file,
-                tool,
-                keep,
-                list,
-            } => {
+            Screen::PickKeep { file, list } => {
                 if back {
-                    Some(tool_picker(file.clone(), *tool))
+                    Some(tool_picker(file.clone(), Tool::DialogueSeparation))
+                } else {
+                    navigate(list, key.code);
+                    let selected = list.selected().and_then(|i| Keep::CHOICES.get(i));
+                    match (key.code, selected) {
+                        (KeyCode::Enter, Some(&keep)) => Some(backend_picker(file.clone(), keep)),
+                        _ => None,
+                    }
+                }
+            }
+            Screen::PickBackend { file, keep, list } => {
+                if back {
+                    Some(keep_picker(file.clone(), Some(*keep)))
                 } else {
                     navigate(list, key.code);
                     let selected = list.selected().and_then(|i| Backend::CHOICES.get(i));
@@ -266,7 +270,6 @@ impl App {
                             &mut self.next_run,
                             &self.results_tx,
                             file.clone(),
-                            *tool,
                             Job::Separate(*keep, backend),
                             false,
                         )),
@@ -274,19 +277,16 @@ impl App {
                     }
                 }
             }
-            Screen::ConfirmOverwrite {
-                file, tool, job, ..
-            } => match key.code {
+            Screen::ConfirmOverwrite { file, job, .. } => match key.code {
                 KeyCode::Char('y') => Some(start(
                     &mut self.next_run,
                     &self.results_tx,
                     file.clone(),
-                    *tool,
                     *job,
                     true,
                 )),
-                KeyCode::Char('n') => Some(tool_picker(file.clone(), *tool)),
-                _ if back => Some(tool_picker(file.clone(), *tool)),
+                KeyCode::Char('n') => Some(tool_picker(file.clone(), job.tool())),
+                _ if back => Some(tool_picker(file.clone(), job.tool())),
                 _ => None,
             },
             Screen::Running {
@@ -302,13 +302,13 @@ impl App {
             }
             Screen::Output {
                 file,
-                tool,
+                job,
                 scroll,
                 viewport,
                 ..
             } => {
                 if back {
-                    Some(tool_picker(file.clone(), *tool))
+                    Some(tool_picker(file.clone(), job.tool()))
                 } else {
                     // Keep one line of overlap so paging doesn't lose your place.
                     let page = viewport.saturating_sub(1).max(1);
@@ -337,7 +337,6 @@ impl App {
     fn on_result(&mut self, run: RunId, finished: Finished) -> ControlFlow<()> {
         if let Screen::Running {
             file,
-            tool,
             job,
             run: current,
             cancelling,
@@ -349,10 +348,9 @@ impl App {
                 return ControlFlow::Break(());
             }
             self.screen = match finished {
-                _ if *cancelling => tool_picker(file.clone(), *tool),
+                _ if *cancelling => tool_picker(file.clone(), job.tool()),
                 Finished::Output(lines) => Screen::Output {
                     file: file.clone(),
-                    tool: *tool,
                     job: *job,
                     lines,
                     scroll: 0,
@@ -360,7 +358,6 @@ impl App {
                 },
                 Finished::Exists(output) => Screen::ConfirmOverwrite {
                     file: file.clone(),
-                    tool: *tool,
                     job: *job,
                     output,
                 },
@@ -384,18 +381,21 @@ impl App {
                 vec![truncate_left(&tilde(&self.dir), width)]
             }
             Screen::PickTool { file, .. } => vec![file_name(file)],
-            Screen::PickBackend { file, tool, .. } => {
-                vec![file_name(file), tool.name().to_string()]
+            Screen::PickKeep { file, .. } => {
+                vec![file_name(file), Tool::DialogueSeparation.name().into()]
             }
-            Screen::Running {
-                file, tool, job, ..
+            Screen::PickBackend { file, keep, .. } => vec![
+                file_name(file),
+                Tool::DialogueSeparation.name().into(),
+                keep.label().into(),
+            ],
+            Screen::Running { file, job, .. }
+            | Screen::ConfirmOverwrite { file, job, .. }
+            | Screen::Output { file, job, .. } => {
+                let mut crumbs = vec![file_name(file), job.tool().name().into()];
+                crumbs.extend(subtitle(*job));
+                crumbs
             }
-            | Screen::ConfirmOverwrite {
-                file, tool, job, ..
-            }
-            | Screen::Output {
-                file, tool, job, ..
-            } => vec![file_name(file), title(*tool, *job)],
         };
         frame.render_widget(header_line(&crumbs), header);
 
@@ -408,6 +408,11 @@ impl App {
                 draw_tools(frame, body, list);
                 "↑↓ move · Enter run · q back"
             }
+            Screen::PickKeep { list, .. } => {
+                let rows = Keep::CHOICES.map(|k| (k.label(), k.summary()));
+                draw_choices(frame, body, panel("Pick what to remove"), &rows, list);
+                "↑↓ move · Enter pick · q back"
+            }
             Screen::PickBackend { list, .. } => {
                 let rows = Backend::CHOICES.map(|b| (b.label(), b.summary()));
                 draw_choices(frame, body, panel("Pick a model"), &rows, list);
@@ -415,14 +420,13 @@ impl App {
             }
             Screen::Running {
                 file,
-                tool,
                 job,
                 progress,
                 cancelling,
                 ..
             } => {
                 let progress = progress.borrow().clone();
-                let title = title(*tool, *job);
+                let title = title(*job);
                 draw_running(frame, body, &title, file, progress, *cancelling);
                 if *cancelling {
                     "Cancelling…"
@@ -430,24 +434,21 @@ impl App {
                     "Esc cancel"
                 }
             }
-            Screen::ConfirmOverwrite {
-                tool, job, output, ..
-            } => {
+            Screen::ConfirmOverwrite { job, output, .. } => {
                 let question = format!("{}. Overwrite it?", tools::Exists(output.clone()));
                 let paragraph = Paragraph::new(question).wrap(Wrap { trim: true });
-                let title = title(*tool, *job);
+                let title = title(*job);
                 frame.render_widget(paragraph.yellow().block(panel(&title)), body);
                 "y overwrite · n back"
             }
             Screen::Output {
-                tool,
                 job,
                 lines,
                 scroll,
                 viewport,
                 ..
             } => {
-                draw_output(frame, body, &title(*tool, *job), lines, scroll, viewport);
+                draw_output(frame, body, &title(*job), lines, scroll, viewport);
                 "↑↓ PgUp PgDn scroll · q back"
             }
         };
@@ -463,17 +464,27 @@ fn tool_picker(file: PathBuf, tool: Tool) -> Screen {
     }
 }
 
+/// Asks what a separation removes, with `keep` selected, or the first choice.
+fn keep_picker(file: PathBuf, keep: Option<Keep>) -> Screen {
+    let index = keep.map_or(first_index(&Keep::CHOICES), |keep| {
+        Keep::CHOICES.iter().position(|&k| k == keep)
+    });
+    Screen::PickKeep {
+        file,
+        list: ListState::default().with_selected(index),
+    }
+}
+
 /// Asks which model separates the file, offering the default first.
-fn backend_picker(file: PathBuf, tool: Tool, keep: Keep) -> Screen {
+fn backend_picker(file: PathBuf, keep: Keep) -> Screen {
     Screen::PickBackend {
         file,
-        tool,
         keep,
         list: ListState::default().with_selected(first_index(&Backend::CHOICES)),
     }
 }
 
-/// What a run does. Separation also needs the model the user picked.
+/// What a run does. Separation also needs the side and model the user picked.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Job {
     Chapters,
@@ -482,12 +493,28 @@ enum Job {
     Separate(Keep, Backend),
 }
 
-/// The tool's name, plus the model for a separation, such as "Remove noise (TIGER-DnR)".
-fn title(tool: Tool, job: Job) -> String {
-    match job {
-        Job::Separate(_, backend) => format!("{} ({})", tool.name(), backend.label()),
-        Job::Chapters | Job::SyncCheck | Job::Transcribe => tool.name().to_string(),
+impl Job {
+    fn tool(self) -> Tool {
+        match self {
+            Job::Chapters => Tool::Chapters,
+            Job::SyncCheck => Tool::SyncCheck,
+            Job::Transcribe => Tool::Transcribe,
+            Job::Separate(..) => Tool::DialogueSeparation,
+        }
     }
+}
+
+/// The choices below the tool's name, such as "Remove voice (TIGER-DnR)".
+fn subtitle(job: Job) -> Option<String> {
+    match job {
+        Job::Separate(keep, backend) => Some(format!("{} ({})", keep.label(), backend.label())),
+        Job::Chapters | Job::SyncCheck | Job::Transcribe => None,
+    }
+}
+
+/// The run's panel title, the most specific of its crumbs.
+fn title(job: Job) -> String {
+    subtitle(job).unwrap_or_else(|| job.tool().name().into())
 }
 
 /// Spawns `job` as the next run and returns the screen that shows it. `force` lets the job
@@ -496,7 +523,6 @@ fn start(
     next_run: &mut u64,
     results_tx: &UnboundedSender<(RunId, Finished)>,
     file: PathBuf,
-    tool: Tool,
     job: Job,
     force: bool,
 ) -> Screen {
@@ -515,7 +541,6 @@ fn start(
     );
     Screen::Running {
         file,
-        tool,
         job,
         run,
         cancel,
@@ -878,14 +903,13 @@ fn is_video(path: &Path) -> bool {
 mod tests {
     use super::*;
 
-    fn running(tool: Tool, run: RunId, cancel: CancellationToken) -> App {
+    fn running(job: Job, run: RunId, cancel: CancellationToken) -> App {
         let (results_tx, _) = mpsc::unbounded_channel();
         let mut app = App::new(PathBuf::from("/videos"), vec![], results_tx);
         let (_, progress) = watch::channel(None);
         app.screen = Screen::Running {
             file: "/videos/stream.mkv".into(),
-            tool,
-            job: Job::Transcribe,
+            job,
             run,
             cancel,
             cancelling: false,
@@ -904,7 +928,7 @@ mod tests {
 
     #[test]
     fn ignores_results_from_other_runs() {
-        let mut app = running(Tool::SyncCheck, RunId(1), CancellationToken::new());
+        let mut app = running(Job::SyncCheck, RunId(1), CancellationToken::new());
 
         let _ = app.on_result(RunId(0), output("stale"));
 
@@ -914,7 +938,7 @@ mod tests {
     #[test]
     fn esc_cancels_and_waits_for_the_tool_to_clean_up() {
         let cancel = CancellationToken::new();
-        let mut app = running(Tool::Transcribe, RunId(0), cancel.clone());
+        let mut app = running(Job::Transcribe, RunId(0), cancel.clone());
 
         let flow = app.on_key(key(KeyCode::Esc, KeyModifiers::NONE));
 
@@ -931,7 +955,7 @@ mod tests {
 
     #[test]
     fn returns_to_the_tool_once_a_cancelled_run_finishes() {
-        let mut app = running(Tool::Transcribe, RunId(0), CancellationToken::new());
+        let mut app = running(Job::Transcribe, RunId(0), CancellationToken::new());
         let _ = app.on_key(key(KeyCode::Esc, KeyModifiers::NONE));
 
         let flow = app.on_result(RunId(0), output("Error: cancelled"));
@@ -949,7 +973,7 @@ mod tests {
     #[test]
     fn ctrl_c_quits_once_the_running_tool_has_cleaned_up() {
         let cancel = CancellationToken::new();
-        let mut app = running(Tool::Transcribe, RunId(0), cancel.clone());
+        let mut app = running(Job::Transcribe, RunId(0), cancel.clone());
 
         let on_key = app.on_key(key(KeyCode::Char('c'), KeyModifiers::CONTROL));
         let on_result = app.on_result(RunId(0), output("Error: cancelled"));
@@ -966,22 +990,22 @@ mod tests {
 
     #[test]
     fn asks_before_overwriting_an_existing_output() {
-        let mut app = running(Tool::Transcribe, RunId(0), CancellationToken::new());
+        let mut app = running(Job::Transcribe, RunId(0), CancellationToken::new());
 
         confirming(&mut app);
 
-        let Screen::ConfirmOverwrite { tool, output, .. } = &app.screen else {
+        let Screen::ConfirmOverwrite { job, output, .. } = &app.screen else {
             panic!("expected the overwrite confirmation");
         };
         assert_eq!(
-            (*tool, output.as_path()),
-            (Tool::Transcribe, Path::new("/videos/stream.srt"))
+            (*job, output.as_path()),
+            (Job::Transcribe, Path::new("/videos/stream.srt"))
         );
     }
 
     #[tokio::test]
     async fn reruns_the_tool_once_overwriting_is_confirmed() {
-        let mut app = running(Tool::Transcribe, RunId(0), CancellationToken::new());
+        let mut app = running(Job::Transcribe, RunId(0), CancellationToken::new());
         confirming(&mut app);
 
         let _ = app.on_key(key(KeyCode::Char('y'), KeyModifiers::NONE));
@@ -989,7 +1013,7 @@ mod tests {
         assert!(matches!(
             app.screen,
             Screen::Running {
-                tool: Tool::Transcribe,
+                job: Job::Transcribe,
                 ..
             }
         ));
@@ -997,7 +1021,7 @@ mod tests {
 
     #[test]
     fn returns_to_the_tool_when_overwriting_is_declined() {
-        let mut app = running(Tool::Transcribe, RunId(0), CancellationToken::new());
+        let mut app = running(Job::Transcribe, RunId(0), CancellationToken::new());
         confirming(&mut app);
 
         let _ = app.on_key(key(KeyCode::Char('n'), KeyModifiers::NONE));
@@ -1005,29 +1029,36 @@ mod tests {
         assert!(matches!(app.screen, Screen::PickTool { .. }));
     }
 
-    #[test]
-    fn asks_for_a_model_before_separating_offering_tiger_first() {
+    fn idle(screen: Screen) -> App {
         let (results_tx, _) = mpsc::unbounded_channel();
         let mut app = App::new(PathBuf::from("/videos"), vec![], results_tx);
-        app.screen = tool_picker("/videos/stream.mkv".into(), Tool::RemoveVoice);
+        app.screen = screen;
+        app
+    }
 
-        let _ = app.on_key(key(KeyCode::Enter, KeyModifiers::NONE));
+    fn press(app: &mut App, codes: &[KeyCode]) {
+        for &code in codes {
+            let _ = app.on_key(key(code, KeyModifiers::NONE));
+        }
+    }
 
-        let Screen::PickBackend {
-            file,
-            tool,
-            keep,
-            list,
-        } = &app.screen
-        else {
+    #[test]
+    fn asks_what_to_remove_then_the_model_offering_tiger_first() {
+        let mut app = idle(tool_picker(
+            "/videos/stream.mkv".into(),
+            Tool::DialogueSeparation,
+        ));
+
+        press(&mut app, &[KeyCode::Enter, KeyCode::Down, KeyCode::Enter]);
+
+        let Screen::PickBackend { file, keep, list } = &app.screen else {
             panic!("expected the model picker");
         };
         let selected = list.selected().map(|i| Backend::CHOICES[i]);
         assert_eq!(
-            (file.as_path(), *tool, *keep, selected),
+            (file.as_path(), *keep, selected),
             (
                 Path::new("/videos/stream.mkv"),
-                Tool::RemoveVoice,
                 Keep::Ambience,
                 Some(Backend::Tiger)
             )
@@ -1035,29 +1066,39 @@ mod tests {
     }
 
     #[test]
-    fn backs_out_of_the_model_picker_to_its_tool() {
-        let (results_tx, _) = mpsc::unbounded_channel();
-        let mut app = App::new(PathBuf::from("/videos"), vec![], results_tx);
-        app.screen = backend_picker("/videos/stream.mkv".into(), Tool::RemoveNoise, Keep::Voice);
+    fn backs_out_of_the_model_picker_to_the_side_it_came_from() {
+        let mut app = idle(backend_picker("/videos/stream.mkv".into(), Keep::Ambience));
 
-        let _ = app.on_key(key(KeyCode::Esc, KeyModifiers::NONE));
+        press(&mut app, &[KeyCode::Esc]);
+
+        let Screen::PickKeep { list, .. } = &app.screen else {
+            panic!("expected the side picker");
+        };
+        assert_eq!(
+            list.selected().map(|i| Keep::CHOICES[i]),
+            Some(Keep::Ambience)
+        );
+    }
+
+    #[test]
+    fn backs_out_of_the_side_picker_to_dialogue_separation() {
+        let mut app = idle(keep_picker("/videos/stream.mkv".into(), None));
+
+        press(&mut app, &[KeyCode::Esc]);
 
         let Screen::PickTool { list, .. } = &app.screen else {
             panic!("expected the tool picker");
         };
         assert_eq!(
             list.selected().map(|i| Tool::ALL[i]),
-            Some(Tool::RemoveNoise)
+            Some(Tool::DialogueSeparation)
         );
     }
 
     #[test]
-    fn titles_a_separation_with_its_model() {
+    fn titles_a_separation_with_its_side_and_model() {
         assert_eq!(
-            title(
-                Tool::RemoveNoise,
-                Job::Separate(Keep::Voice, Backend::Tiger)
-            ),
+            title(Job::Separate(Keep::Voice, Backend::Tiger)),
             "Remove noise (TIGER-DnR)"
         );
     }

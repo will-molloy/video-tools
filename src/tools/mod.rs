@@ -47,21 +47,15 @@ pub enum Tool {
     Chapters,
     SyncCheck,
     Transcribe,
-
-    /// `dialogue-separation --keep voice`.
-    RemoveNoise,
-
-    /// `dialogue-separation --keep ambience`.
-    RemoveVoice,
+    DialogueSeparation,
 }
 
 impl Tool {
-    pub const ALL: [Tool; 5] = [
+    pub const ALL: [Tool; 4] = [
         Tool::Chapters,
         Tool::SyncCheck,
         Tool::Transcribe,
-        Tool::RemoveNoise,
-        Tool::RemoveVoice,
+        Tool::DialogueSeparation,
     ];
 
     pub fn name(self) -> &'static str {
@@ -69,8 +63,7 @@ impl Tool {
             Tool::Chapters => "Chapters",
             Tool::SyncCheck => "Sync Check",
             Tool::Transcribe => "Transcribe",
-            Tool::RemoveNoise => "Remove noise",
-            Tool::RemoveVoice => "Remove voice",
+            Tool::DialogueSeparation => "Dialogue Separation",
         }
     }
 
@@ -79,8 +72,7 @@ impl Tool {
             Tool::Chapters => "YouTube description chapter list",
             Tool::SyncCheck => "Diagnose audio/video sync problems",
             Tool::Transcribe => "Extract dialogue to .srt file",
-            Tool::RemoveNoise => "Keep dialogue, drop everything else",
-            Tool::RemoveVoice => "Keep everything but dialogue",
+            Tool::DialogueSeparation => "Remove background noise or dialogue",
         }
     }
 }
