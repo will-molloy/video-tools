@@ -1,0 +1,10 @@
+---
+source: tests/dialogue_separation.rs
+expression: "workspace.vt(&[\"missing.mp4\", \"--keep\", \"voice\"])"
+---
+exit: 2
+
+stdout:
+
+stderr:
+Error: ffprobe failed: missing.mp4: No such file or directory

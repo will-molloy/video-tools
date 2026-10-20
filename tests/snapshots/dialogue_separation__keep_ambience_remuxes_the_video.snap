@@ -1,0 +1,12 @@
+---
+source: tests/dialogue_separation.rs
+expression: "workspace.vt(&[\"clean-cfr.mp4\", \"--keep\", \"ambience\"])"
+---
+exit: 0
+
+stdout:
+Kept the ambience in clean-cfr.ambience.mp4.
+Separated with the fake backend on cpu in [elapsed] s.
+1 speech interval, 10.0 s in all.
+
+stderr:

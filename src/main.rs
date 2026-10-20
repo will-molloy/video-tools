@@ -9,7 +9,10 @@ use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
 
-use tools::{Tool, chapters::ChaptersArgs, sync_check::SyncCheckArgs, transcribe::TranscribeArgs};
+use tools::{
+    Tool, chapters::ChaptersArgs, dialogue_separation::DialogueSeparationArgs,
+    sync_check::SyncCheckArgs, transcribe::TranscribeArgs,
+};
 
 /// Video processing toolbox. Run without a subcommand to open the TUI.
 #[derive(Debug, Parser)]
@@ -29,6 +32,9 @@ enum Command {
 
     #[command(about = Tool::Transcribe.summary())]
     Transcribe(TranscribeArgs),
+
+    #[command(about = Tool::DialogueSeparation.summary())]
+    DialogueSeparation(DialogueSeparationArgs),
 }
 
 /// Exit code for errors, distinct from the 1 that tools use for "found a problem".
@@ -41,6 +47,7 @@ async fn main() -> ExitCode {
         Some(Command::Chapters(args)) => tools::chapters::cli(&args).await,
         Some(Command::SyncCheck(args)) => tools::sync_check::cli(&args).await,
         Some(Command::Transcribe(args)) => tools::transcribe::cli(&args).await,
+        Some(Command::DialogueSeparation(args)) => tools::dialogue_separation::cli(&args).await,
     };
     result.unwrap_or_else(|e| {
         eprintln!("Error: {e:#}");

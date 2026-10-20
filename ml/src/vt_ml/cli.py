@@ -11,12 +11,13 @@ from typing import NoReturn
 
 from vt_ml.errors import Terminated, UsageError
 from vt_ml.protocol import EXIT_ERROR, EXIT_OK, EXIT_TERMINATED, Protocol, Stats, claim_stdout
+from vt_ml.separate import STAGE as SEPARATE
 from vt_ml.stage import Stage
 from vt_ml.transcribe import STAGE as TRANSCRIBE
 
 log = logging.getLogger("vt_ml")
 
-STAGES: dict[str, Stage] = {"transcribe": TRANSCRIBE}
+STAGES: dict[str, Stage] = {"separate": SEPARATE, "transcribe": TRANSCRIBE}
 
 
 class _Parser(argparse.ArgumentParser):
