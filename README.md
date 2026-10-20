@@ -23,12 +23,21 @@ cargo uninstall video-tools
 
 ## Usage
 
+### Interactive (TUI)
+
 ```sh
-vt                  # open the TUI in the current directory
-vt chapters FILE    # YouTube description chapter list
-vt sync-check FILE  # diagnose audio/video sync problems
-vt transcribe FILE  # extract dialogue to .srt file
+vt
 ```
+
+Each tool is also a subcommand.
+
+### Tools
+
+| Tool         | Description                        | Requirements                                                                                                                     |
+|--------------|------------------------------------|----------------------------------------------------------------------------------------------------------------------------------|
+| `chapters`   | YouTube description chapter list   | `ffprobe`                                                                                                                        |
+| `sync-check` | Diagnose audio/video sync problems | `ffprobe`                                                                                                                        |
+| `transcribe` | Extract dialogue to .srt file      | `ffmpeg`, `ffprobe`, `uv`, AMD (ROCm) or NVIDIA GPU ([Whisper](https://huggingface.co/openai/whisper-large-v3-turbo): 5 GB VRAM) |
 
 ## Contributing
 
