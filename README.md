@@ -25,8 +25,9 @@ cargo uninstall video-tools
 
 ```sh
 vt                  # open the TUI in the current directory
-vt chapters FILE    # print a YouTube description chapter list
+vt chapters FILE    # YouTube description chapter list
 vt sync-check FILE  # diagnose audio/video sync problems
+vt transcribe FILE  # extract dialogue to .srt file
 ```
 
 ## Contributing

@@ -1,8 +1,7 @@
-#[expect(dead_code, reason = "the ML tools stacked on this use it")]
 mod ffmpeg;
 mod ffprobe;
-#[expect(dead_code, reason = "the ML tools stacked on this use it")]
 mod ml;
+mod srt;
 mod tools;
 mod tui;
 
@@ -10,7 +9,7 @@ use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
 
-use tools::{chapters::ChaptersArgs, sync_check::SyncCheckArgs};
+use tools::{Tool, chapters::ChaptersArgs, sync_check::SyncCheckArgs, transcribe::TranscribeArgs};
 
 /// Video processing toolbox. Run without a subcommand to open the TUI.
 #[derive(Debug, Parser)]
@@ -22,11 +21,14 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
-    /// Print chapters as a YouTube description chapter list
+    #[command(about = Tool::Chapters.summary())]
     Chapters(ChaptersArgs),
 
-    /// Diagnose audio/video sync problems and recommend a fix
+    #[command(about = Tool::SyncCheck.summary())]
     SyncCheck(SyncCheckArgs),
+
+    #[command(about = Tool::Transcribe.summary())]
+    Transcribe(TranscribeArgs),
 }
 
 /// Exit code for errors, distinct from the 1 that tools use for "found a problem".
@@ -38,6 +40,7 @@ async fn main() -> ExitCode {
         None => tui::run().await.map(|()| ExitCode::SUCCESS),
         Some(Command::Chapters(args)) => tools::chapters::cli(&args).await,
         Some(Command::SyncCheck(args)) => tools::sync_check::cli(&args).await,
+        Some(Command::Transcribe(args)) => tools::transcribe::cli(&args).await,
     };
     result.unwrap_or_else(|e| {
         eprintln!("Error: {e:#}");
