@@ -29,7 +29,7 @@ cargo uninstall video-tools
 vt
 ```
 
-Each tool is also a subcommand.
+Each tool can also be run directly from the CLI.
 
 ### Tools
 
