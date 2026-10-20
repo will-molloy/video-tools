@@ -28,3 +28,7 @@ vt                  # open the TUI in the current directory
 vt chapters FILE    # print a YouTube description chapter list
 vt sync-check FILE  # diagnose audio/video sync problems
 ```
+
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md).
