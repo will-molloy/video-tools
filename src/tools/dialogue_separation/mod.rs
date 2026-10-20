@@ -28,7 +28,7 @@ use crate::{
         protocol::{Message, Stats},
     },
     srt,
-    tools::{sync_check::thousands, transcribe},
+    tools::{self, sync_check::thousands, transcribe},
 };
 use cache::{Cache, Entry, Key, Pending};
 use media::{AudioStream, Encoding, Output};
@@ -51,6 +51,10 @@ pub struct DialogueSeparationArgs {
     /// `.srt` extension.
     #[arg(long)]
     transcript: Option<PathBuf>,
+
+    /// Replace an existing output
+    #[arg(long)]
+    force: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -156,9 +160,11 @@ pub async fn cli(args: &DialogueSeparationArgs) -> Result<ExitCode> {
         &transcript,
         args.keep,
         args.backend,
+        args.force,
         &cancel,
         |progress| ml::cli::show_progress(&progress),
     );
+    let run = async { run.await.map_err(tools::suggest_force) };
     ml::cli::run(&cancel, run, |outcome| outcome.lines()).await
 }
 
@@ -271,6 +277,7 @@ pub async fn run(
     transcript: &Path,
     keep: Keep,
     backend: Backend,
+    force: bool,
     cancel: &CancellationToken,
     mut on_progress: impl FnMut(Progress),
 ) -> Result<Outcome> {
@@ -287,12 +294,14 @@ pub async fn run(
         .streams
         .iter()
         .any(|s| matches!(s.kind, StreamKind::Video { .. }));
+    let output_file = output_path(path, keep, has_video);
+    tools::check_output(&output_file, force)?;
     let spans = speech::spans(&read_transcript(path, transcript)?);
 
     // Decided before separating, which can take an hour, so a problem here fails fast.
     let output = if has_video {
         Output::Remux {
-            path: output_path(path, keep, true),
+            path: output_file,
             audio: AudioStream {
                 index: audio.index,
                 sample_rate,
@@ -302,7 +311,7 @@ pub async fn run(
         }
     } else {
         Output::Wav {
-            path: output_path(path, keep, false),
+            path: output_file,
             sample_rate,
         }
     };

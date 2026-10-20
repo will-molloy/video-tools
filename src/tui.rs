@@ -592,7 +592,7 @@ async fn run_job(
         }
         Job::Separate(keep, backend) => {
             let transcript = transcribe::transcript_path(file);
-            dialogue_separation::run(file, &transcript, keep, backend, cancel, |p| {
+            dialogue_separation::run(file, &transcript, keep, backend, force, cancel, |p| {
                 progress.send_replace(Some(Progress::Separation(p)));
             })
             .await

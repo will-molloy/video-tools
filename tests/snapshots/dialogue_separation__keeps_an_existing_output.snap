@@ -1,0 +1,11 @@
+---
+source: tests/dialogue_separation.rs
+assertion_line: 403
+expression: "workspace.vt(&[\"clean-cfr.mp4\", \"--keep\", \"voice\"])"
+---
+exit: 2
+
+stdout:
+
+stderr:
+Error: clean-cfr.voice.mp4 already exists; pass --force to replace it
