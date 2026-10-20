@@ -19,9 +19,12 @@ use std::{
 use anyhow::{Context, Result};
 
 use super::{Backend, speech::Span};
-use crate::ml::{
-    protocol::Stats,
-    scratch::{self, Scratch},
+use crate::{
+    ml::{
+        protocol::Stats,
+        scratch::{self, Scratch},
+    },
+    quote::quote,
 };
 
 /// Bump when the Python stage's output changes, so stale stems aren't reused.
@@ -39,7 +42,7 @@ pub struct Key(String);
 impl Key {
     pub fn of(path: &Path, backend: Backend, spans: &[Span]) -> Result<Key> {
         let mut file =
-            File::open(path).with_context(|| format!("failed to open {}", path.display()))?;
+            File::open(path).with_context(|| format!("failed to open {}", quote(path)))?;
         let meta = file.metadata().context("failed to read file metadata")?;
         let mtime = meta
             .modified()

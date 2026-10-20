@@ -7,4 +7,4 @@ exit: 2
 stdout:
 
 stderr:
-Error: failed to read clean-cfr.srt: block 1: bad timestamp "soon"; expected HH:MM:SS,mmm
+Error: failed to read "clean-cfr.srt": block 1: bad timestamp "soon"; expected HH:MM:SS,mmm

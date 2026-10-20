@@ -54,7 +54,7 @@ impl Scratch {
     pub fn persist(self, target: &Path) -> Result<()> {
         if !target.exists() {
             fs::rename(&self.dir, target)
-                .with_context(|| format!("failed to move {} into place", self.dir.display()))?;
+                .with_context(|| format!("failed to move {} into place", quote(&self.dir)))?;
         }
         Ok(())
     }

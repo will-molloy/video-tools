@@ -27,6 +27,7 @@ use crate::{
         self, child,
         protocol::{Message, Stats},
     },
+    quote::{quote, quote_name},
     srt,
     tools::{self, sync_check::thousands, transcribe},
 };
@@ -251,10 +252,7 @@ pub struct Outcome {
 
 impl Outcome {
     pub fn lines(&self) -> Vec<String> {
-        let file = self.output.file_name().map_or_else(
-            || self.output.display().to_string(),
-            |name| name.to_string_lossy().into_owned(),
-        );
+        let file = quote_name(&self.output);
         let Stats {
             device,
             elapsed_s,
@@ -375,12 +373,12 @@ fn read_transcript(file: &Path, transcript: &Path) -> Result<Vec<srt::Block>> {
     let text = fs::read_to_string(transcript).map_err(|e| match e.kind() {
         std::io::ErrorKind::NotFound => anyhow!(
             "no transcript at {}; run `vt transcribe {}` first",
-            transcript.display(),
-            file.display()
+            quote(transcript),
+            quote(file)
         ),
-        _ => anyhow!("failed to read {}: {e}", transcript.display()),
+        _ => anyhow!("failed to read {}: {e}", quote(transcript)),
     })?;
-    srt::parse(&text).with_context(|| format!("failed to read {}", transcript.display()))
+    srt::parse(&text).with_context(|| format!("failed to read {}", quote(transcript)))
 }
 
 async fn separate(
@@ -396,7 +394,7 @@ async fn separate(
     let input = pending.dir().join("input.wav");
     let speech = pending.dir().join("speech.json");
     fs::write(&speech, speech::json(spans))
-        .with_context(|| format!("failed to write {}", speech.display()))?;
+        .with_context(|| format!("failed to write {}", quote(&speech)))?;
     // Built first, so a missing GPU fails before extraction.
     let mut command = ml::command("separate", backend.extra())?;
     command
@@ -441,10 +439,10 @@ async fn separate(
     if (voice, ambience) != (&expected.0, &expected.1) {
         bail!(
             "the separate stage wrote {} and {}, not the expected {} and {}",
-            voice.display(),
-            ambience.display(),
-            expected.0.display(),
-            expected.1.display()
+            quote(voice),
+            quote(ambience),
+            quote(&expected.0),
+            quote(&expected.1)
         );
     }
     pending.commit(&done.stats)
@@ -521,12 +519,21 @@ mod tests {
         }
     }
 
+    /// The outcome's lines as the CLI prints them.
+    fn printed(outcome: &Outcome) -> Vec<String> {
+        outcome
+            .lines()
+            .iter()
+            .map(|line| crate::quote::plain(line))
+            .collect()
+    }
+
     #[test]
     fn reports_a_fresh_separation_with_vram() {
         assert_eq!(
-            outcome(false, Some(9123.5)).lines(),
+            printed(&outcome(false, Some(9123.5))),
             [
-                "Kept the voice in talk.voice.mp4.",
+                "Kept the voice in \"talk.voice.mp4\".",
                 "Separated with SAM Audio on cuda:0 (AMD Radeon RX 9070 XT, HIP 7.2) in 83.2 s.",
                 "2 speech intervals, 5.2 s in all.",
                 "Peak VRAM: 9,124 MB.",
@@ -537,9 +544,9 @@ mod tests {
     #[test]
     fn reports_a_cache_hit() {
         assert_eq!(
-            outcome(true, None).lines(),
+            printed(&outcome(true, None)),
             [
-                "Kept the voice in talk.voice.mp4.",
+                "Kept the voice in \"talk.voice.mp4\".",
                 "Reused the cached separation by SAM Audio, made on \
                  cuda:0 (AMD Radeon RX 9070 XT, HIP 7.2) in 83.2 s.",
                 "2 speech intervals, 5.2 s in all.",
