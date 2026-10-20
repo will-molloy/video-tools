@@ -8,6 +8,10 @@ to take the same path, since only long-form returns segments.
 A segment's own start snaps back to its window's start when silence precedes the speech, so
 segments are trimmed to their words' timestamps, which come from aligning each token with the
 audio.
+
+Word timestamps need the model's attentions, and long-form keeps every window's outputs until it
+returns. The encoder's attentions alone are about 3 GB a window, so `_Whisper` drops the
+attentions once a window's timestamps are extracted.
 """
 
 from collections.abc import Callable
@@ -38,13 +42,33 @@ DECODING = {
 }
 
 
+class _Whisper(WhisperForConditionalGeneration):
+    """Keeps only what long-form generation reads from a window: its tokens, scores and
+    timestamps."""
+
+    def _postprocess_outputs(self, seek_outputs, **kwargs):
+        if isinstance(seek_outputs, torch.Tensor):
+            return super()._postprocess_outputs(seek_outputs=seek_outputs, **kwargs)
+
+        # Emptied before they're copied to the CPU.
+        for key in ("encoder_attentions", "decoder_attentions"):
+            if seek_outputs.get(key) is not None:
+                seek_outputs[key] = ()
+        sequences, outputs = super()._postprocess_outputs(seek_outputs=seek_outputs, **kwargs)
+
+        # Read once, to extract the token timestamps.
+        for output in outputs:
+            output.pop("cross_attentions", None)
+        return sequences, outputs
+
+
 class WhisperBackend:
     def __init__(self, device: str, log: Callable[[str], None]):
         self._torch_device, self.device = resolve(device)
         log(f"Loading {REPO}")
         self._processor = AutoProcessor.from_pretrained(REPO)
         self._model = (
-            WhisperForConditionalGeneration.from_pretrained(REPO, dtype=torch.float16)
+            _Whisper.from_pretrained(REPO, dtype=torch.float16)
             .to(self._torch_device)
             .eval()
         )
