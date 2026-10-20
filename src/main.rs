@@ -44,7 +44,7 @@ async fn main() -> ExitCode {
         Some(Command::Transcribe(args)) => tools::transcribe::cli(&args).await,
     };
     result.unwrap_or_else(|e| {
-        eprintln!("Error: {e:#}");
+        eprintln!("Error: {}", quote::plain(&format!("{e:#}")));
         ExitCode::from(ERROR_EXIT)
     })
 }

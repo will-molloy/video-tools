@@ -10,7 +10,7 @@ use anyhow::{Context, Result};
 use tokio::signal::unix::{SignalKind, signal};
 use tokio_util::sync::CancellationToken;
 
-use crate::ffprobe::Cancelled;
+use crate::{ffprobe::Cancelled, quote};
 
 const SIGINT: u8 = 2;
 const SIGTERM: u8 = 15;
@@ -49,7 +49,7 @@ pub async fn run<T>(
         return Ok(ExitCode::from(128 + signal));
     }
     for line in lines(result?) {
-        println!("{line}");
+        println!("{}", quote::plain(&line));
     }
     Ok(ExitCode::SUCCESS)
 }

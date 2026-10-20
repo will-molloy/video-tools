@@ -30,7 +30,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::{
     ffprobe::Cancelled,
-    quote::{quote, quote_name},
+    quote::{self, quote},
     tools::{
         self, Tool,
         chapters::{self, Outcome},
@@ -327,16 +327,16 @@ impl App {
             Screen::PickFile => {
                 let prefix = HEADER_LOGO.chars().count() + HEADER_SEPARATOR.chars().count();
                 let width = usize::from(header.width).saturating_sub(prefix);
-                vec![truncate_left(&tilde(&self.dir), width)]
+                vec![Span::from(truncate_left(&tilde(&self.dir), width))]
             }
-            Screen::PickTool { file, .. } => vec![file_name(file)],
+            Screen::PickTool { file, .. } => vec![File(file).span()],
             Screen::Running { file, tool, .. }
             | Screen::ConfirmOverwrite { file, tool, .. }
             | Screen::Output { file, tool, .. } => {
-                vec![file_name(file), tool.name().to_string()]
+                vec![File(file).span(), Span::from(tool.name())]
             }
         };
-        frame.render_widget(header_line(&crumbs), header);
+        frame.render_widget(header_line(crumbs), header);
 
         let hints = match &mut self.screen {
             Screen::PickFile => {
@@ -363,7 +363,10 @@ impl App {
                 }
             }
             Screen::ConfirmOverwrite { tool, output, .. } => {
-                let question = format!("{}. Overwrite it?", tools::Exists(output.clone()));
+                let question = Line::from(vec![
+                    File(output).span(),
+                    Span::from(" already exists. Overwrite it?"),
+                ]);
                 let paragraph = Paragraph::new(question).wrap(Wrap { trim: true });
                 frame.render_widget(paragraph.yellow().block(panel(tool.name())), body);
                 "y overwrite · n back"
@@ -464,10 +467,24 @@ fn spawn_tool(
 
 /// An error's message in red, then any detail below it, such as a stage's stderr, in gray.
 fn error_lines(error: &str) -> ToolOutput {
-    let mut lines = error.lines().map(|line| Line::from(line.to_string()));
+    let mut lines = error.lines().map(message);
     let mut output: ToolOutput = lines.next().map(Line::red).into_iter().collect();
     output.extend(lines.map(Line::dark_gray));
     output
+}
+
+/// A tool's message as one line, with the paths it marked styled as files.
+fn message(text: &str) -> Line<'static> {
+    let spans: Vec<Span> = quote::runs(text)
+        .map(|(run, path)| {
+            if path {
+                File::style(run)
+            } else {
+                Span::from(run.to_string())
+            }
+        })
+        .collect();
+    Line::from(spans)
 }
 
 async fn run_tool(
@@ -495,7 +512,7 @@ async fn run_tool(
                 progress.send_replace(Some(Progress::Transcription(p)));
             })
             .await
-            .map(|outcome| outcome.lines().into_iter().map(Line::from).collect())
+            .map(|outcome| outcome.lines().iter().map(|line| message(line)).collect())
         }
     }
 }
@@ -503,7 +520,7 @@ async fn run_tool(
 fn chapters_lines(file: &Path, outcome: Outcome) -> ToolOutput {
     match outcome {
         Outcome::NoChapters => {
-            vec![Line::from(format!("{} has no chapters.", quote_name(file))).yellow()]
+            vec![Line::from(vec![File(file).span(), Span::from(" has no chapters.")]).yellow()]
         }
         Outcome::Chapters(report) => {
             let mut lines: Vec<Line> = report.lines().map(Line::from).collect();
@@ -548,11 +565,11 @@ fn sync_check_lines(report: &Report) -> ToolOutput {
 const HEADER_LOGO: &str = " vt ";
 const HEADER_SEPARATOR: &str = " › ";
 
-fn header_line(crumbs: &[String]) -> Line<'static> {
+fn header_line(crumbs: Vec<Span<'static>>) -> Line<'static> {
     let mut spans = vec![Span::from(HEADER_LOGO).reversed().bold()];
     for crumb in crumbs {
         spans.push(Span::from(HEADER_SEPARATOR).dark_gray());
-        spans.push(Span::from(crumb.clone()));
+        spans.push(crumb);
     }
     Line::from(spans)
 }
@@ -598,7 +615,7 @@ fn draw_files(frame: &mut Frame, area: Rect, files: &[PathBuf], state: &mut List
         frame.render_widget(paragraph.dark_gray().block(block), area);
         return;
     }
-    let list = List::new(files.iter().map(|f| file_name(f)))
+    let list = List::new(files.iter().map(|f| File(f).span()))
         .block(block)
         .highlight_style(highlight())
         .highlight_symbol("› ");
@@ -646,8 +663,12 @@ fn draw_running(
     ])
     .areas(inner);
     let verb = if cancelling { "Cancelling" } else { "Running" };
-    let status = format!("{verb} {} on {}…", tool.name(), quote_name(file));
-    frame.render_widget(Line::from(status), text);
+    let status = Line::from(vec![
+        Span::from(format!("{verb} {} on ", tool.name())),
+        File(file).span(),
+        Span::from("…"),
+    ]);
+    frame.render_widget(status, text);
 
     match progress {
         None => {}
@@ -724,11 +745,25 @@ fn draw_output(
     }
 }
 
-fn file_name(path: &Path) -> String {
-    path.file_name()
-        .unwrap_or(path.as_os_str())
-        .to_string_lossy()
-        .into_owned()
+/// A file the TUI names, which it shows in bold wherever it appears.
+struct File<'a>(&'a Path);
+
+impl File<'_> {
+    /// The file's name, without its directory.
+    fn span(&self) -> Span<'static> {
+        File::style(
+            &self
+                .0
+                .file_name()
+                .unwrap_or(self.0.as_os_str())
+                .to_string_lossy(),
+        )
+    }
+
+    /// `text` styled as a file, for a path a tool's message names.
+    fn style(text: &str) -> Span<'static> {
+        Span::from(text.to_string()).bold()
+    }
 }
 
 fn list_videos(dir: &Path) -> Result<Vec<PathBuf>> {

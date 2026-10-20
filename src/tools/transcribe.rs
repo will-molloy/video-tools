@@ -296,6 +296,8 @@ mod tests {
         assert_eq!(progress.to_string(), "1% · 1:15 of 3:00:00");
     }
 
+    use crate::quote;
+
     #[test]
     fn describes_stage_logs() {
         assert_eq!(
@@ -317,10 +319,19 @@ mod tests {
         }
     }
 
+    /// The outcome's lines as the CLI prints them.
+    fn printed(outcome: &Outcome) -> Vec<String> {
+        outcome
+            .lines()
+            .iter()
+            .map(|line| quote::plain(line))
+            .collect()
+    }
+
     #[test]
     fn reports_the_transcript_and_how_it_ran() {
         assert_eq!(
-            outcome(12, Some(4752.0)).lines(),
+            printed(&outcome(12, Some(4752.0))),
             [
                 "Wrote 12 lines of speech to \"talk.srt\".",
                 "Transcribed with Whisper large-v3-turbo on cuda:0 (AMD Radeon RX 9070 XT, HIP \
@@ -333,7 +344,7 @@ mod tests {
     #[test]
     fn reports_a_transcript_without_speech() {
         assert_eq!(
-            outcome(0, None).lines()[0],
+            printed(&outcome(0, None))[0],
             "Found no speech, so \"talk.srt\" is empty."
         );
     }
