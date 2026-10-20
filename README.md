@@ -33,11 +33,11 @@ Each tool is also a subcommand.
 
 ### Tools
 
-| Tool         | Description                        | Requirements                                                                                                                     |
-|--------------|------------------------------------|----------------------------------------------------------------------------------------------------------------------------------|
-| `chapters`   | YouTube description chapter list   | `ffprobe`                                                                                                                        |
-| `sync-check` | Diagnose audio/video sync problems | `ffprobe`                                                                                                                        |
-| `transcribe` | Extract dialogue to .srt file      | `ffmpeg`, `ffprobe`, `uv`, AMD (ROCm) or NVIDIA GPU ([Whisper](https://huggingface.co/openai/whisper-large-v3-turbo): 5 GB VRAM) |
+| Tool         | Description                        | Requirements                                                                                                                                                             |
+|--------------|------------------------------------|--------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `chapters`   | YouTube description chapter list   | <ul><li>`ffprobe`</li></ul>                                                                                                                                              |
+| `sync-check` | Diagnose audio/video sync problems | <ul><li>`ffprobe`</li></ul>                                                                                                                                              |
+| `transcribe` | Extract dialogue to .srt file      | <ul><li>`ffmpeg`</li><li>`ffprobe`</li><li>`uv`</li><li>AMD (ROCm) or NVIDIA GPU ([Whisper](https://huggingface.co/openai/whisper-large-v3-turbo): 5 GB VRAM)</li></ul> |
 
 ## Contributing
 
