@@ -59,14 +59,32 @@ pub struct DialogueSeparationArgs {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub enum Keep {
-    /// Dialogue only
+    /// Keep dialogue only
     Voice,
 
-    /// Everything but dialogue
+    /// Keep everything but dialogue
     Ambience,
 }
 
 impl Keep {
+    /// The sides the TUI offers, noise removal first.
+    pub const CHOICES: [Keep; 2] = [Keep::Voice, Keep::Ambience];
+
+    /// What keeping this side removes, as the TUI offers it.
+    pub fn label(self) -> &'static str {
+        match self {
+            Keep::Voice => "Remove noise",
+            Keep::Ambience => "Remove voice",
+        }
+    }
+
+    pub fn summary(self) -> &'static str {
+        match self {
+            Keep::Voice => "Keep dialogue only",
+            Keep::Ambience => "Keep everything but dialogue",
+        }
+    }
+
     fn name(self) -> &'static str {
         match self {
             Keep::Voice => "voice",
