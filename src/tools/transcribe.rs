@@ -23,6 +23,7 @@ use crate::{
         protocol::{Message, Stats},
         scratch::{self, Scratch},
     },
+    quote::{quote, quote_name},
     srt::{self, Block},
     tools::{self, sync_check::thousands},
 };
@@ -160,10 +161,7 @@ pub struct Outcome {
 
 impl Outcome {
     pub fn lines(&self) -> Vec<String> {
-        let file = self.output.file_name().map_or_else(
-            || self.output.display().to_string(),
-            |name| name.to_string_lossy().into_owned(),
-        );
+        let file = quote_name(&self.output);
         let Stats {
             device,
             elapsed_s,
@@ -280,8 +278,8 @@ impl From<Segment> for Block {
 fn write(path: &Path, contents: &str) -> Result<()> {
     let partial = path.with_extension("srt.partial");
     fs::write(&partial, contents)
-        .with_context(|| format!("failed to write {}", partial.display()))?;
-    fs::rename(&partial, path).with_context(|| format!("failed to write {}", path.display()))
+        .with_context(|| format!("failed to write {}", quote(&partial)))?;
+    fs::rename(&partial, path).with_context(|| format!("failed to write {}", quote(path)))
 }
 
 #[cfg(test)]
@@ -324,7 +322,7 @@ mod tests {
         assert_eq!(
             outcome(12, Some(4752.0)).lines(),
             [
-                "Wrote 12 lines of speech to talk.srt.",
+                "Wrote 12 lines of speech to \"talk.srt\".",
                 "Transcribed with Whisper large-v3-turbo on cuda:0 (AMD Radeon RX 9070 XT, HIP \
                  7.2) in 9.8 s.",
                 "Peak VRAM: 4,752 MB.",
@@ -336,7 +334,7 @@ mod tests {
     fn reports_a_transcript_without_speech() {
         assert_eq!(
             outcome(0, None).lines()[0],
-            "Found no speech, so talk.srt is empty."
+            "Found no speech, so \"talk.srt\" is empty."
         );
     }
 }

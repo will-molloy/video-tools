@@ -1,6 +1,7 @@
 mod ffmpeg;
 mod ffprobe;
 mod ml;
+mod quote;
 mod srt;
 mod tools;
 mod tui;

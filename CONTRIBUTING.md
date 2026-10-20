@@ -23,6 +23,8 @@ Guidelines for both humans and coding agents.
   It checks with `tools::check_output` before any slow work and fails with `tools::Exists`.
   - The CLI takes `--force` to replace the output, and maps the error with `tools::suggest_force`.
   - The TUI asks to confirm, then reruns the tool forced.
+- Messages put paths in double quotes with `quote::quote` or `quote::quote_name`, so names with spaces stand out.
+  Commands go in backticks, such as `vt transcribe FILE`.
 
 ## Development
 

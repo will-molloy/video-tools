@@ -5,6 +5,8 @@ use std::{
 
 use anyhow::anyhow;
 
+use crate::quote::quote_name;
+
 pub mod chapters;
 pub mod sync_check;
 pub mod transcribe;
@@ -16,8 +18,7 @@ pub struct Exists(pub PathBuf);
 
 impl fmt::Display for Exists {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let name = self.0.file_name().unwrap_or(self.0.as_os_str());
-        write!(f, "{} already exists", name.to_string_lossy())
+        write!(f, "{} already exists", quote_name(&self.0))
     }
 }
 

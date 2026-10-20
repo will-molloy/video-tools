@@ -10,6 +10,8 @@ use std::path::{Path, PathBuf};
 use anyhow::{Result, bail};
 use tokio::process::Command;
 
+use crate::quote::quote;
+
 const ML_PROJECT_ENV: &str = "VT_ML_PROJECT";
 const GPU_ENV: &str = "VT_GPU";
 
@@ -25,7 +27,7 @@ pub fn command(stage: &str, model: Option<&str>) -> Result<Command> {
     if !project.join("pyproject.toml").is_file() {
         bail!(
             "no Python project at {}; set {ML_PROJECT_ENV} to vt's ml/ directory",
-            project.display()
+            quote(&project)
         );
     }
     let mut command = Command::new("uv");

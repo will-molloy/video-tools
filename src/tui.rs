@@ -30,6 +30,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::{
     ffprobe::Cancelled,
+    quote::{quote, quote_name},
     tools::{
         self, Tool,
         chapters::{self, Outcome},
@@ -502,7 +503,7 @@ async fn run_tool(
 fn chapters_lines(file: &Path, outcome: Outcome) -> ToolOutput {
     match outcome {
         Outcome::NoChapters => {
-            vec![Line::from(format!("{} has no chapters.", file_name(file))).yellow()]
+            vec![Line::from(format!("{} has no chapters.", quote_name(file))).yellow()]
         }
         Outcome::Chapters(report) => {
             let mut lines: Vec<Line> = report.lines().map(Line::from).collect();
@@ -645,7 +646,7 @@ fn draw_running(
     ])
     .areas(inner);
     let verb = if cancelling { "Cancelling" } else { "Running" };
-    let status = format!("{verb} {} on {}…", tool.name(), file_name(file));
+    let status = format!("{verb} {} on {}…", tool.name(), quote_name(file));
     frame.render_widget(Line::from(status), text);
 
     match progress {
@@ -732,7 +733,7 @@ fn file_name(path: &Path) -> String {
 
 fn list_videos(dir: &Path) -> Result<Vec<PathBuf>> {
     let mut files: Vec<PathBuf> = std::fs::read_dir(dir)
-        .with_context(|| format!("failed to list {}", dir.display()))?
+        .with_context(|| format!("failed to list {}", quote(dir)))?
         .filter_map(|entry| entry.ok().map(|e| e.path()))
         .filter(|path| path.is_file() && is_video(path))
         .collect();

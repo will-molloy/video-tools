@@ -5,7 +5,7 @@ expression: "workspace.vt(&[\"speech-bursts.mkv\"])"
 exit: 0
 
 stdout:
-Wrote 2 lines of speech to speech-bursts.srt.
+Wrote 2 lines of speech to "speech-bursts.srt".
 Transcribed with the fake backend on cpu in [elapsed] s.
 
 stderr:
