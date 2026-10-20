@@ -23,3 +23,35 @@ Guidelines for both humans and coding agents.
   It checks with `tools::check_output` before any slow work and fails with `tools::Exists`.
   - The CLI takes `--force` to replace the output, and maps the error with `tools::suggest_force`.
   - The TUI asks to confirm, then reruns the tool forced.
+
+## Development
+
+### Checks
+
+CI runs these, so run them before pushing.
+
+```sh
+cargo fmt --check
+cargo clippy --all-targets --locked -- -D warnings
+cargo test --locked
+uv run --project ml pytest
+```
+
+### Tests
+
+- Tests need `ffprobe` and `uv` on `PATH`.
+- Review snapshot changes with [`cargo insta`](https://insta.rs).
+
+### Fixtures
+
+`gen.sh` needs `ffmpeg`, and CI runs `--check`.
+
+```sh
+tests/fixtures/gen.sh          # regenerate the media fixtures
+tests/fixtures/gen.sh --check  # check each fixture has its intended defect
+```
+
+### Commits
+
+- Commits and PR titles follow [Conventional Commits](https://www.conventionalcommits.org).
+- Merges to `main` tag a release, with the version bump derived from those commits.
