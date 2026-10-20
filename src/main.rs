@@ -27,7 +27,7 @@ enum Command {
     /// Diagnose audio/video sync problems and recommend a fix
     SyncCheck(SyncCheckArgs),
 
-    /// Write the speech as an editable SRT transcript next to the file
+    /// Extract dialogue to .srt file
     Transcribe(TranscribeArgs),
 }
 

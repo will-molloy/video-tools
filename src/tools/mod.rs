@@ -25,7 +25,7 @@ impl Tool {
         match self {
             Tool::Chapters => "YouTube description chapter list",
             Tool::SyncCheck => "Diagnose audio/video sync problems",
-            Tool::Transcribe => "Editable subtitles of the speech",
+            Tool::Transcribe => "Extract dialogue to .srt file",
         }
     }
 }
