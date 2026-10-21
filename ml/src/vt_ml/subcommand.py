@@ -1,4 +1,4 @@
-"""What a stage provides to the entry point."""
+"""What a subcommand provides to the entry point."""
 
 import argparse
 from collections.abc import Callable, Mapping
@@ -8,16 +8,16 @@ from typing import Protocol
 
 @dataclass(frozen=True)
 class Finished:
-    """A stage's result fields, plus the device it ran on and its peak VRAM."""
+    """A subcommand's result fields, plus the device it ran on and its peak VRAM."""
 
     result: Mapping[str, object]
     device: str
     peak_vram_mb: float | None
 
 
-class Stage(Protocol):
+class Subcommand(Protocol):
     def configure(self, parser: argparse.ArgumentParser) -> None:
-        """Adds the stage's arguments."""
+        """Adds the subcommand's arguments."""
 
     def run(
         self,
@@ -25,4 +25,4 @@ class Stage(Protocol):
         report: Callable[[str], None],
         progress: Callable[[int, int], None],
     ) -> Finished:
-        """Does the stage's work. Raises `UsageError` for failures the user can fix."""
+        """Does the subcommand's work. Raises `UsageError` for failures the user can fix."""

@@ -1,6 +1,6 @@
-//! Runs an ML stage and streams its protocol messages.
+//! Runs `vt-ml` and streams its protocol messages.
 //!
-//! `uv run` starts Python as its own child, so the stage runs in a new process group and signals
+//! `uv run` starts Python as its own child, so `vt-ml` runs in a new process group and signals
 //! go to the whole group. Otherwise SIGKILL, which uv can't forward, would orphan Python, and a
 //! terminal's Ctrl-C would reach Python directly instead of through `vt`'s cancellation.
 
@@ -28,7 +28,7 @@ use tokio_util::sync::CancellationToken;
 use super::protocol::{self, Done, Message};
 use crate::ffprobe::Cancelled;
 
-/// How long a stage gets to clean up after SIGTERM before SIGKILL. Stages check for the signal
+/// How long `vt-ml` gets to clean up after SIGTERM before SIGKILL. It checks for the signal
 /// between chunks, and a chunk can take several seconds on the GPU.
 pub const TERM_GRACE: Duration = Duration::from_secs(30);
 
@@ -128,12 +128,12 @@ fn last_redraw(line: &str) -> &str {
         .unwrap_or_default()
 }
 
-/// Whether SIGKILL ended the stage. uv reports its Python child's SIGKILL as exit code 137.
+/// Whether SIGKILL ended `vt-ml`. uv reports its Python child's SIGKILL as exit code 137.
 fn killed(status: ExitStatus) -> bool {
     status.signal() == Some(Signal::SIGKILL as i32) || status.code() == Some(128 + 9)
 }
 
-/// The stage's process group, which shares its leader's pid.
+/// `vt-ml`'s process group, which shares its leader's pid.
 struct Group(Pid);
 
 impl Group {
@@ -239,7 +239,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn reports_the_stages_error_message() {
+    async fn reports_the_error_message() {
         let script = r#"echo '{"type": "error", "message": "the model is gated"}'
                         exit 2"#;
 
@@ -344,7 +344,7 @@ mod tests {
     async fn cancels_with_sigterm_and_lets_the_child_clean_up() {
         let dir = tempfile::tempdir().unwrap();
         let partial = dir.path().join("output.wav");
-        // Like an ML stage, the trap removes partial output before exiting.
+        // Like `vt-ml`, the trap removes partial output before exiting.
         let script = format!(
             r#"trap 'rm {p}; exit 143' TERM
                touch {p}

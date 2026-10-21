@@ -1,6 +1,6 @@
 //! `vt dialogue-separation`: separate dialogue from everything else and keep one side.
 //!
-//! The pipeline extracts the audio at the model's sample rate, runs the Python stage in `ml/`
+//! The pipeline extracts the audio at the model's sample rate, runs `vt-ml separate` from `ml/`
 //! (see its README for the contract), caches both stems, then writes the kept one: as a WAV
 //! for audio-only inputs, or remuxed with the original video for the rest.
 
@@ -21,13 +21,12 @@ use serde::Deserialize;
 use tokio_util::sync::CancellationToken;
 
 use crate::{
-    ffmpeg,
+    display, ffmpeg,
     ffprobe::{self, Cancelled, StreamKind},
     ml::{
         self, child,
         protocol::{Message, Stats},
     },
-    quote::{quote, quote_name},
     srt,
     tools::{self, sync_check::thousands, transcribe},
 };
@@ -118,7 +117,7 @@ impl Backend {
     /// The backends users can pick, the default first.
     pub const CHOICES: [Backend; 2] = [Backend::Tiger, Backend::Sam];
 
-    /// The name the Python stage knows the backend by.
+    /// The name `vt-ml` knows the backend by.
     fn name(self) -> &'static str {
         match self {
             Backend::Sam => "sam",
@@ -191,11 +190,11 @@ pub async fn cli(args: &DialogueSeparationArgs) -> Result<ExitCode> {
 pub enum Progress {
     Extracting,
 
-    /// Waiting for the stage's first message. The first run of a backend also installs its
+    /// Waiting for `vt-ml`'s first message. The first run of a backend also installs its
     /// Python dependencies here, which can take minutes.
     Starting,
 
-    /// The stage's latest status, such as the model it's loading.
+    /// `vt-ml`'s latest status, such as the model it's loading.
     Log(String),
 
     /// Counts one step per channel per chunk.
@@ -224,7 +223,7 @@ impl fmt::Display for Progress {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Progress::Extracting => f.write_str("Extracting audio…"),
-            Progress::Starting => f.write_str("Starting the separation stage…"),
+            Progress::Starting => f.write_str("Starting separation…"),
             Progress::Log(message) => write!(f, "{message}…"),
             Progress::Separating { done, total } => {
                 let percent = self.ratio().unwrap_or(0.0) * 100.0;
@@ -252,7 +251,7 @@ pub struct Outcome {
 
 impl Outcome {
     pub fn lines(&self) -> Vec<String> {
-        let file = quote_name(&self.output);
+        let file = display::name(&self.output);
         let Stats {
             device,
             elapsed_s,
@@ -373,12 +372,12 @@ fn read_transcript(file: &Path, transcript: &Path) -> Result<Vec<srt::Block>> {
     let text = fs::read_to_string(transcript).map_err(|e| match e.kind() {
         std::io::ErrorKind::NotFound => anyhow!(
             "no transcript at {}; run `vt transcribe {}` first",
-            quote(transcript),
-            quote(file)
+            display::path(transcript),
+            display::path(file)
         ),
-        _ => anyhow!("failed to read {}: {e}", quote(transcript)),
+        _ => anyhow!("failed to read {}: {e}", display::path(transcript)),
     })?;
-    srt::parse(&text).with_context(|| format!("failed to read {}", quote(transcript)))
+    srt::parse(&text).with_context(|| format!("failed to read {}", display::path(transcript)))
 }
 
 async fn separate(
@@ -394,7 +393,7 @@ async fn separate(
     let input = pending.dir().join("input.wav");
     let speech = pending.dir().join("speech.json");
     fs::write(&speech, speech::json(spans))
-        .with_context(|| format!("failed to write {}", quote(&speech)))?;
+        .with_context(|| format!("failed to write {}", display::path(&speech)))?;
     // Built first, so a missing GPU fails before extraction.
     let mut command = ml::command("separate", backend.extra())?;
     command
@@ -438,11 +437,11 @@ async fn separate(
     );
     if (voice, ambience) != (&expected.0, &expected.1) {
         bail!(
-            "the separate stage wrote {} and {}, not the expected {} and {}",
-            quote(voice),
-            quote(ambience),
-            quote(&expected.0),
-            quote(&expected.1)
+            "`vt-ml separate` wrote {} and {}, not the expected {} and {}",
+            display::path(voice),
+            display::path(ambience),
+            display::path(&expected.0),
+            display::path(&expected.1)
         );
     }
     pending.commit(&done.stats)
@@ -496,7 +495,7 @@ mod tests {
     }
 
     #[test]
-    fn describes_stage_logs() {
+    fn describes_logs() {
         assert_eq!(
             Progress::Log("Loading facebook/sam-audio-large".into()).to_string(),
             "Loading facebook/sam-audio-large…"
@@ -524,7 +523,7 @@ mod tests {
         outcome
             .lines()
             .iter()
-            .map(|line| crate::quote::plain(line))
+            .map(|line| display::plain(line))
             .collect()
     }
 

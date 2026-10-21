@@ -1,7 +1,7 @@
 [project]
 name = "vt-ml"
 version = "0.1.0"
-description = "The machine-learning stages of vt"
+description = "The machine-learning subcommands of vt"
 requires-python = ">=3.12,<3.13"
 dependencies = [
   # laion-clap, a SAM Audio dependency, caps numpy below 2.
@@ -9,7 +9,7 @@ dependencies = [
   "soundfile>=0.14.0",
 ]
 
-# Each stage's model is an extra, so the `fake` backends, and CI, install no ML stack. A model's
+# Each subcommand's model is an extra, so the `fake` backends, and CI, install no ML stack. A model's
 # extra goes with one GPU extra, `rocm` or `cuda`, which picks the torch build.
 [project.optional-dependencies]
 whisper = [

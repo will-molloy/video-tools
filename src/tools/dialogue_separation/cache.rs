@@ -20,14 +20,14 @@ use anyhow::{Context, Result};
 
 use super::{Backend, speech::Span};
 use crate::{
+    display,
     ml::{
         protocol::Stats,
         scratch::{self, Scratch},
     },
-    quote::quote,
 };
 
-/// Bump when the Python stage's output changes, so stale stems aren't reused.
+/// Bump when `vt-ml separate`'s output changes, so stale stems aren't reused.
 const FORMAT: u32 = 2;
 
 const SAMPLE_BYTES: u64 = 1 << 20;
@@ -42,7 +42,7 @@ pub struct Key(String);
 impl Key {
     pub fn of(path: &Path, backend: Backend, spans: &[Span]) -> Result<Key> {
         let mut file =
-            File::open(path).with_context(|| format!("failed to open {}", quote(path)))?;
+            File::open(path).with_context(|| format!("failed to open {}", display::path(path)))?;
         let meta = file.metadata().context("failed to read file metadata")?;
         let mtime = meta
             .modified()

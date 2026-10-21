@@ -1,4 +1,4 @@
-"""Entry point `vt` spawns as `vt-ml <stage> ...`. See `ml/README.md` for the contract."""
+"""Entry point `vt` spawns as `vt-ml <subcommand> ...`. See `ml/README.md` for the contract."""
 
 import argparse
 import logging
@@ -11,13 +11,13 @@ from typing import NoReturn
 
 from vt_ml.errors import Terminated, UsageError
 from vt_ml.protocol import EXIT_ERROR, EXIT_OK, EXIT_TERMINATED, Protocol, Stats, claim_stdout
-from vt_ml.separate import STAGE as SEPARATE
-from vt_ml.stage import Stage
-from vt_ml.transcribe import STAGE as TRANSCRIBE
+from vt_ml.separate import SUBCOMMAND as SEPARATE
+from vt_ml.subcommand import Subcommand
+from vt_ml.transcribe import SUBCOMMAND as TRANSCRIBE
 
 log = logging.getLogger("vt_ml")
 
-STAGES: dict[str, Stage] = {"separate": SEPARATE, "transcribe": TRANSCRIBE}
+SUBCOMMANDS: dict[str, Subcommand] = {"separate": SEPARATE, "transcribe": TRANSCRIBE}
 
 
 class _Parser(argparse.ArgumentParser):
@@ -27,11 +27,11 @@ class _Parser(argparse.ArgumentParser):
         raise UsageError(message)
 
 
-def _parser(stages: Mapping[str, Stage]) -> argparse.ArgumentParser:
+def _parser(subcommands: Mapping[str, Subcommand]) -> argparse.ArgumentParser:
     parser = _Parser(prog="vt-ml", description=__doc__)
-    subparsers = parser.add_subparsers(dest="stage", required=True, parser_class=_Parser)
-    for name, stage in stages.items():
-        stage.configure(subparsers.add_parser(name))
+    subparsers = parser.add_subparsers(dest="subcommand", required=True, parser_class=_Parser)
+    for name, subcommand in subcommands.items():
+        subcommand.configure(subparsers.add_parser(name))
     return parser
 
 
@@ -42,24 +42,26 @@ def _on_sigterm(signum, frame) -> NoReturn:
     raise Terminated
 
 
-def main(argv: list[str] | None = None, stages: Mapping[str, Stage] = STAGES) -> NoReturn:
+def main(
+    argv: list[str] | None = None, subcommands: Mapping[str, Subcommand] = SUBCOMMANDS
+) -> NoReturn:
     protocol = claim_stdout()
     logging.basicConfig(stream=sys.stderr, level=logging.WARNING, format="%(name)s: %(message)s")
     log.setLevel(logging.INFO)
     signal.signal(signal.SIGTERM, _on_sigterm)
-    sys.exit(run(protocol, argv, stages))
+    sys.exit(run(protocol, argv, subcommands))
 
 
-def run(protocol: Protocol, argv: list[str] | None, stages: Mapping[str, Stage]) -> int:
+def run(protocol: Protocol, argv: list[str] | None, subcommands: Mapping[str, Subcommand]) -> int:
     try:
-        args = _parser(stages).parse_args(argv)
+        args = _parser(subcommands).parse_args(argv)
         start = time.monotonic()
 
         def report(message: str) -> None:
             log.info(message)
             protocol.log(message)
 
-        finished = stages[args.stage].run(args, report, protocol.progress)
+        finished = subcommands[args.subcommand].run(args, report, protocol.progress)
         protocol.done(
             finished.result,
             Stats(finished.device, time.monotonic() - start, finished.peak_vram_mb),

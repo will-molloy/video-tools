@@ -7,7 +7,7 @@ from pathlib import Path
 import soundfile as sf
 
 from vt_ml.errors import UsageError
-from vt_ml.stage import Finished
+from vt_ml.subcommand import Finished
 from vt_ml.transcribe import backends
 from vt_ml.transcribe.segment import Segment
 
@@ -49,4 +49,4 @@ def _json(segment: Segment) -> dict[str, object]:
     return {"start": round(segment.start, 3), "end": round(segment.end, 3), "text": segment.text}
 
 
-STAGE = Transcribe()
+SUBCOMMAND = Transcribe()

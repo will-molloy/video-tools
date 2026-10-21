@@ -14,7 +14,7 @@ EXIT_TERMINATED = 143
 
 @dataclass(frozen=True)
 class Stats:
-    """How a stage ran, reported alongside its result."""
+    """How a subcommand ran, reported alongside its result."""
 
     device: str
     elapsed_s: float
@@ -36,7 +36,7 @@ class Protocol:
         self._emit({"type": "log", "message": message})
 
     def done(self, result: Mapping[str, object], stats: Stats) -> None:
-        """Reports success. `result` holds the stage's own fields."""
+        """Reports success. `result` holds the subcommand's own fields."""
         self._emit(
             {
                 "type": "done",

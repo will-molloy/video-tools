@@ -200,7 +200,7 @@ fn cancels_on_sigint_and_cleans_up() {
         .spawn()
         .unwrap();
 
-    // Waits until the stage is mid-run, reading the audio in its scratch directory.
+    // Waits until `vt-ml` is mid-run, reading the audio in its scratch directory.
     let deadline = Instant::now() + Duration::from_secs(60);
     let scratch = loop {
         let scratch = workspace
@@ -212,7 +212,7 @@ fn cancels_on_sigint_and_cleans_up() {
         {
             break scratch.to_str().unwrap().to_string();
         }
-        assert!(Instant::now() < deadline, "the stage never started");
+        assert!(Instant::now() < deadline, "vt-ml never started");
         thread::sleep(Duration::from_millis(20));
     };
 

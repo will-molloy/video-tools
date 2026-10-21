@@ -1,7 +1,7 @@
+mod display;
 mod ffmpeg;
 mod ffprobe;
 mod ml;
-mod quote;
 mod srt;
 mod tools;
 mod tui;
@@ -51,7 +51,7 @@ async fn main() -> ExitCode {
         Some(Command::DialogueSeparation(args)) => tools::dialogue_separation::cli(&args).await,
     };
     result.unwrap_or_else(|e| {
-        eprintln!("Error: {}", quote::plain(&format!("{e:#}")));
+        eprintln!("Error: {}", display::plain(&format!("{e:#}")));
         ExitCode::from(ERROR_EXIT)
     })
 }

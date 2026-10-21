@@ -1,7 +1,7 @@
 //! `vt transcribe`: write the speech in a file as an SRT transcript next to it.
 //!
-//! The pipeline extracts the first audio stream as mono 16 kHz, runs the `transcribe` stage in
-//! `ml/` (see its README for the contract), then writes one SRT block per segment of speech.
+//! The pipeline extracts the first audio stream as mono 16 kHz, runs `vt-ml transcribe`
+//! from `ml/` (see its README for the contract), then writes one SRT block per segment of speech.
 
 use std::{
     fmt, fs,
@@ -16,19 +16,18 @@ use serde::Deserialize;
 use tokio_util::sync::CancellationToken;
 
 use crate::{
-    ffmpeg,
+    display, ffmpeg,
     ffprobe::{self, Cancelled, StreamKind},
     ml::{
         self, child,
         protocol::{Message, Stats},
         scratch::{self, Scratch},
     },
-    quote::{quote, quote_name},
     srt::{self, Block},
     tools::{self, sync_check::thousands},
 };
 
-/// Whisper's rate, which the stage requires.
+/// Whisper's rate, which `vt-ml transcribe` requires.
 const SAMPLE_RATE: u32 = 16_000;
 
 #[derive(Debug, Args)]
@@ -54,7 +53,7 @@ pub enum Backend {
 }
 
 impl Backend {
-    /// The name the stage knows the backend by.
+    /// The name `vt-ml` knows the backend by.
     fn name(self) -> &'static str {
         match self {
             Backend::Whisper => "whisper",
@@ -101,11 +100,11 @@ pub async fn cli(args: &TranscribeArgs) -> Result<ExitCode> {
 pub enum Progress {
     Extracting,
 
-    /// Waiting for the stage's first message. The first run also installs the model's Python
+    /// Waiting for `vt-ml`'s first message. The first run also installs the model's Python
     /// dependencies here, which can take minutes.
     Starting,
 
-    /// The stage's latest status, such as the model it's loading.
+    /// `vt-ml`'s latest status, such as the model it's loading.
     Log(String),
 
     Transcribing {
@@ -130,7 +129,7 @@ impl fmt::Display for Progress {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Progress::Extracting => f.write_str("Extracting audio…"),
-            Progress::Starting => f.write_str("Starting the transcription stage…"),
+            Progress::Starting => f.write_str("Starting transcription…"),
             Progress::Log(message) => write!(f, "{message}…"),
             Progress::Transcribing { done, total } => {
                 let percent = self.ratio().unwrap_or(0.0) * 100.0;
@@ -161,7 +160,7 @@ pub struct Outcome {
 
 impl Outcome {
     pub fn lines(&self) -> Vec<String> {
-        let file = quote_name(&self.output);
+        let file = display::name(&self.output);
         let Stats {
             device,
             elapsed_s,
@@ -284,8 +283,8 @@ impl From<Segment> for Block {
 fn write(path: &Path, contents: &str) -> Result<()> {
     let partial = path.with_extension("srt.partial");
     fs::write(&partial, contents)
-        .with_context(|| format!("failed to write {}", quote(&partial)))?;
-    fs::rename(&partial, path).with_context(|| format!("failed to write {}", quote(path)))
+        .with_context(|| format!("failed to write {}", display::path(&partial)))?;
+    fs::rename(&partial, path).with_context(|| format!("failed to write {}", display::path(path)))
 }
 
 #[cfg(test)]
@@ -302,10 +301,8 @@ mod tests {
         assert_eq!(progress.to_string(), "1% · 1:15 of 3:00:00");
     }
 
-    use crate::quote;
-
     #[test]
-    fn describes_stage_logs() {
+    fn describes_logs() {
         assert_eq!(
             Progress::Log("Loading openai/whisper-large-v3-turbo".into()).to_string(),
             "Loading openai/whisper-large-v3-turbo…"
@@ -330,7 +327,7 @@ mod tests {
         outcome
             .lines()
             .iter()
-            .map(|line| quote::plain(line))
+            .map(|line| display::plain(line))
             .collect()
     }
 

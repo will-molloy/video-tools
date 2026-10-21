@@ -29,8 +29,8 @@ use tokio::{
 use tokio_util::sync::CancellationToken;
 
 use crate::{
+    display,
     ffprobe::Cancelled,
-    quote::{self, quote},
     tools::{
         self, Tool,
         chapters::{self, Outcome},
@@ -381,19 +381,19 @@ impl App {
                 let width = usize::from(header.width).saturating_sub(prefix);
                 vec![Span::from(truncate_left(&tilde(&self.dir), width))]
             }
-            Screen::PickTool { file, .. } => vec![File(file).span()],
+            Screen::PickTool { file, .. } => vec![File(file).display()],
             Screen::PickKeep { file, .. } => {
-                vec![File(file).span(), Tool::DialogueSeparation.name().into()]
+                vec![File(file).display(), Tool::DialogueSeparation.name().into()]
             }
             Screen::PickBackend { file, keep, .. } => vec![
-                File(file).span(),
+                File(file).display(),
                 Tool::DialogueSeparation.name().into(),
                 keep.label().into(),
             ],
             Screen::Running { file, job, .. }
             | Screen::ConfirmOverwrite { file, job, .. }
             | Screen::Output { file, job, .. } => {
-                let mut crumbs = vec![File(file).span(), job.tool().name().into()];
+                let mut crumbs = vec![File(file).display(), job.tool().name().into()];
                 crumbs.extend(subtitle(*job).map(Span::from));
                 crumbs
             }
@@ -437,7 +437,7 @@ impl App {
             }
             Screen::ConfirmOverwrite { job, output, .. } => {
                 let question = Line::from(vec![
-                    File(output).span(),
+                    File(output).display(),
                     Span::from(" already exists. Overwrite it?"),
                 ]);
                 let paragraph = Paragraph::new(question).wrap(Wrap { trim: true });
@@ -592,7 +592,7 @@ fn spawn_job(
     });
 }
 
-/// An error's message in red, then any detail below it, such as a stage's stderr, in gray.
+/// An error's message in red, then any detail below it, such as `vt-ml`'s stderr, in gray.
 fn error_lines(error: &str) -> ToolOutput {
     let mut lines = error.lines().map(message);
     let mut output: ToolOutput = lines.next().map(Line::red).into_iter().collect();
@@ -602,7 +602,7 @@ fn error_lines(error: &str) -> ToolOutput {
 
 /// A tool's message as one line, with the paths it marked styled as files.
 fn message(text: &str) -> Line<'static> {
-    let spans: Vec<Span> = quote::runs(text)
+    let spans: Vec<Span> = display::runs(text)
         .map(|(run, path)| {
             if path {
                 File::style(run)
@@ -663,7 +663,7 @@ fn ml_lines(lines: Vec<String>) -> ToolOutput {
 fn chapters_lines(file: &Path, outcome: Outcome) -> ToolOutput {
     match outcome {
         Outcome::NoChapters => {
-            vec![Line::from(vec![File(file).span(), Span::from(" has no chapters.")]).yellow()]
+            vec![Line::from(vec![File(file).display(), Span::from(" has no chapters.")]).yellow()]
         }
         Outcome::Chapters(report) => {
             let mut lines: Vec<Line> = report.lines().map(Line::from).collect();
@@ -758,7 +758,7 @@ fn draw_files(frame: &mut Frame, area: Rect, files: &[PathBuf], state: &mut List
         frame.render_widget(paragraph.dark_gray().block(block), area);
         return;
     }
-    let list = List::new(files.iter().map(|f| File(f).span()))
+    let list = List::new(files.iter().map(|f| File(f).display()))
         .block(block)
         .highlight_style(highlight())
         .highlight_symbol("› ");
@@ -822,7 +822,7 @@ fn draw_running(
     let verb = if cancelling { "Cancelling" } else { "Running" };
     let status = Line::from(vec![
         Span::from(format!("{verb} {title} on ")),
-        File(file).span(),
+        File(file).display(),
         Span::from("…"),
     ]);
     frame.render_widget(status, text);
@@ -911,7 +911,7 @@ struct File<'a>(&'a Path);
 
 impl File<'_> {
     /// The file's name, without its directory.
-    fn span(&self) -> Span<'static> {
+    fn display(&self) -> Span<'static> {
         File::style(
             &self
                 .0
@@ -929,7 +929,7 @@ impl File<'_> {
 
 fn list_videos(dir: &Path) -> Result<Vec<PathBuf>> {
     let mut files: Vec<PathBuf> = std::fs::read_dir(dir)
-        .with_context(|| format!("failed to list {}", quote(dir)))?
+        .with_context(|| format!("failed to list {}", display::path(dir)))?
         .filter_map(|entry| entry.ok().map(|e| e.path()))
         .filter(|path| path.is_file() && is_video(path))
         .collect();
