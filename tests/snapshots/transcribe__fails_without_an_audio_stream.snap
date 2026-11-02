@@ -1,0 +1,10 @@
+---
+source: tests/transcribe.rs
+expression: "workspace.vt(&[\"chapters-valid.mkv\"])"
+---
+exit: 2
+
+stdout:
+
+stderr:
+Error: no audio stream

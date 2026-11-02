@@ -11,6 +11,8 @@ use std::{
 
 use anyhow::{Context, Result};
 
+use crate::quote::quote;
+
 const PARTIAL: &str = ".partial-";
 
 /// `~/.cache/video-tools/<tool>`, or under `$XDG_CACHE_HOME`.
@@ -31,7 +33,7 @@ pub struct Scratch {
 
 impl Scratch {
     pub fn new(root: &Path, prefix: &str) -> Result<Scratch> {
-        fs::create_dir_all(root).with_context(|| format!("failed to create {}", root.display()))?;
+        fs::create_dir_all(root).with_context(|| format!("failed to create {}", quote(root)))?;
         sweep(root);
 
         // The counter keeps a cancelled run that's still cleaning up from colliding with its
@@ -39,7 +41,7 @@ impl Scratch {
         static RUNS: AtomicU64 = AtomicU64::new(0);
         let run = RUNS.fetch_add(1, Ordering::Relaxed);
         let dir = root.join(format!("{prefix}{PARTIAL}{}-{run}", std::process::id()));
-        fs::create_dir(&dir).with_context(|| format!("failed to create {}", dir.display()))?;
+        fs::create_dir(&dir).with_context(|| format!("failed to create {}", quote(&dir)))?;
         Ok(Scratch { dir })
     }
 
