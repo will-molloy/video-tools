@@ -77,10 +77,14 @@ enum Finished {
     Skipped,
 }
 
+/// The latest progress of one file. It holds the latest report only, so the tool never waits on
+/// the UI.
+type ProgressRx = watch::Receiver<Option<Progress>>;
+
 /// News of one file in a run.
 #[derive(Debug)]
 enum FileEvent {
-    Started(watch::Receiver<Option<Progress>>),
+    Started(ProgressRx),
     Finished(Finished),
 }
 
@@ -94,9 +98,7 @@ struct FileRun {
 #[derive(Debug)]
 enum FileState {
     Waiting,
-
-    /// Holds the latest report only, so the tool never waits on the UI.
-    Running(watch::Receiver<Option<Progress>>),
+    Running(ProgressRx),
 
     Finished(Finished),
 }
@@ -192,6 +194,8 @@ enum Screen {
         /// Set once the user cancels. The screen stays until the tool has cleaned up, so a
         /// subprocess can't outlive its screen.
         cancelling: bool,
+
+        scroll: Scroll,
     },
     ConfirmOverwrite {
         job: Job,
@@ -201,13 +205,35 @@ enum Screen {
         job: Job,
         files: Vec<FileRun>,
         lines: ToolOutput,
-
-        /// May overshoot; `draw_output` clamps it to the content.
-        scroll: usize,
-
-        /// Set by `draw_output` so paging can move a screenful.
-        viewport: usize,
+        scroll: Scroll,
     },
+}
+
+/// Where a pane of lines has scrolled to.
+#[derive(Debug, Default, Clone, Copy)]
+struct Scroll {
+    /// May overshoot; `draw_lines` clamps it to the content.
+    offset: usize,
+
+    /// Set by `draw_lines` so paging can move a screenful.
+    viewport: usize,
+}
+
+impl Scroll {
+    fn on_key(&mut self, code: KeyCode) {
+        // Keep one line of overlap so paging doesn't lose your place.
+        let page = self.viewport.saturating_sub(1).max(1);
+        let offset = &mut self.offset;
+        match code {
+            KeyCode::Down | KeyCode::Char('j') => *offset = offset.saturating_add(1),
+            KeyCode::Up | KeyCode::Char('k') => *offset = offset.saturating_sub(1),
+            KeyCode::PageDown | KeyCode::Char(' ') => *offset = offset.saturating_add(page),
+            KeyCode::PageUp => *offset = offset.saturating_sub(page),
+            KeyCode::Home | KeyCode::Char('g') => *offset = 0,
+            KeyCode::End | KeyCode::Char('G') => *offset = usize::MAX,
+            _ => {}
+        }
+    }
 }
 
 impl App {
@@ -374,42 +400,35 @@ impl App {
                         true,
                     ))
                 }
-                KeyCode::Char('n') => Some(conclude(*job, std::mem::take(files))),
-                _ if back => Some(conclude(*job, std::mem::take(files))),
+                KeyCode::Char('n') => {
+                    Some(conclude(*job, std::mem::take(files), Scroll::default()))
+                }
+                _ if back => Some(conclude(*job, std::mem::take(files), Scroll::default())),
                 _ => None,
             },
             Screen::Running {
-                cancel, cancelling, ..
+                cancel,
+                cancelling,
+                scroll,
+                ..
             } => {
                 // The task stops its subprocesses and cleans up, then its result moves this
                 // screen on.
                 if back {
                     cancel.cancel();
                     *cancelling = true;
+                } else {
+                    scroll.on_key(key.code);
                 }
                 None
             }
-            Screen::Output {
-                scroll, viewport, ..
-            } => {
+            Screen::Output { scroll, .. } => {
                 if back {
                     Some(Screen::Pick {
                         focus: Focus::Files,
                     })
                 } else {
-                    // Keep one line of overlap so paging doesn't lose your place.
-                    let page = viewport.saturating_sub(1).max(1);
-                    match key.code {
-                        KeyCode::Down | KeyCode::Char('j') => *scroll = scroll.saturating_add(1),
-                        KeyCode::Up | KeyCode::Char('k') => *scroll = scroll.saturating_sub(1),
-                        KeyCode::PageDown | KeyCode::Char(' ') => {
-                            *scroll = scroll.saturating_add(page);
-                        }
-                        KeyCode::PageUp => *scroll = scroll.saturating_sub(page),
-                        KeyCode::Home | KeyCode::Char('g') => *scroll = 0,
-                        KeyCode::End | KeyCode::Char('G') => *scroll = usize::MAX,
-                        _ => {}
-                    }
+                    scroll.on_key(key.code);
                     None
                 }
             }
@@ -435,6 +454,7 @@ impl App {
             files,
             run: current,
             cancelling,
+            scroll,
             ..
         } = &mut self.screen
         else {
@@ -460,7 +480,7 @@ impl App {
         self.screen = if !*cancelling && files.iter().any(|f| f.existing_output().is_some()) {
             Screen::ConfirmOverwrite { job, files }
         } else {
-            conclude(job, files)
+            conclude(job, files, *scroll)
         };
         ControlFlow::Continue(())
     }
@@ -556,13 +576,14 @@ impl App {
                 job,
                 files,
                 cancelling,
+                scroll,
                 ..
             } => {
-                draw_running(frame, body, &title(*job), files, *cancelling);
+                draw_running(frame, body, &title(*job), files, *cancelling, scroll);
                 if *cancelling {
                     "Cancelling…"
                 } else {
-                    "Esc cancel"
+                    "↑↓ PgUp PgDn scroll · Esc cancel"
                 }
             }
             Screen::ConfirmOverwrite { job, files } => {
@@ -584,13 +605,9 @@ impl App {
                 "y overwrite · n back"
             }
             Screen::Output {
-                job,
-                lines,
-                scroll,
-                viewport,
-                ..
+                job, lines, scroll, ..
             } => {
-                draw_output(frame, body, &title(*job), lines, scroll, viewport);
+                draw_output(frame, body, &title(*job), lines, scroll);
                 "↑↓ PgUp PgDn scroll · q back"
             }
         };
@@ -621,7 +638,7 @@ fn subject(files: &[PathBuf]) -> Span<'static> {
 }
 
 /// Ends a run with the output of its files, or back at the picker if it has no output to show.
-fn conclude(job: Job, mut files: Vec<FileRun>) -> Screen {
+fn conclude(job: Job, mut files: Vec<FileRun>, scroll: Scroll) -> Screen {
     for run in &mut files {
         if run.existing_output().is_some() {
             run.state = FileState::Finished(Finished::Skipped);
@@ -636,8 +653,7 @@ fn conclude(job: Job, mut files: Vec<FileRun>) -> Screen {
         job,
         lines: output_lines(&files),
         files,
-        scroll: 0,
-        viewport: 0,
+        scroll,
     }
 }
 
@@ -652,22 +668,45 @@ fn output_lines(files: &[FileRun]) -> ToolOutput {
     {
         return lines.clone();
     }
-    let mut output = vec![];
-    for (i, run) in files.iter().enumerate() {
-        if i > 0 {
-            output.push(Line::default());
+    result_lines(files, 0).0
+}
+
+/// Each file's name, marked with its state, then any output, in the order of the run. Also
+/// returns the line of each running file, whose name is cut to `name_width` to leave room for its
+/// progress.
+fn result_lines(files: &[FileRun], name_width: usize) -> (ToolOutput, Vec<(usize, &ProgressRx)>) {
+    let mut lines = vec![];
+    let mut running = vec![];
+    let mut spaced = true;
+    for run in files {
+        if !spaced {
+            lines.push(Line::default());
         }
-        output.push(Line::from(File(&run.file).display()));
-        match &run.state {
-            FileState::Finished(Finished::Output(lines) | Finished::Failed(lines)) => {
-                output.extend(lines.iter().cloned());
+        let name = match &run.state {
+            FileState::Running(progress) => {
+                running.push((lines.len(), progress));
+                let name = run.file.file_name().unwrap_or(run.file.as_os_str());
+                let width = name_width.saturating_sub(2);
+                File::style(&truncate_left(&name.to_string_lossy(), width))
             }
-            FileState::Finished(Finished::Exists(_) | Finished::Skipped)
-            | FileState::Waiting
-            | FileState::Running(_) => output.push(Line::from("Skipped.").dark_gray()),
-        }
+            FileState::Waiting | FileState::Finished(_) => File(&run.file).display(),
+        };
+        lines.push(Line::from(vec![state_mark(&run.state), name]));
+
+        let output = match &run.state {
+            FileState::Waiting | FileState::Running(_) => vec![],
+            FileState::Finished(Finished::Output(output) | Finished::Failed(output)) => {
+                output.clone()
+            }
+            FileState::Finished(Finished::Exists(output)) => vec![
+                Line::from(vec![File(output).display(), Span::from(" already exists.")]).yellow(),
+            ],
+            FileState::Finished(Finished::Skipped) => vec![Line::from("Skipped.").dark_gray()],
+        };
+        spaced = output.is_empty();
+        lines.extend(output);
     }
-    output
+    (lines, running)
 }
 
 /// Whether the tool highlighted in `tool_list` has options to set.
@@ -743,6 +782,7 @@ fn start(
         run,
         cancel,
         cancelling: false,
+        scroll: Scroll::default(),
     }
 }
 
@@ -1068,13 +1108,20 @@ fn draw_choices(
     frame.render_stateful_widget(list, area, state);
 }
 
-/// Draws a status line, then a row per file with its progress.
-fn draw_running(frame: &mut Frame, area: Rect, title: &str, files: &[FileRun], cancelling: bool) {
+/// Draws a status line, then each file with its progress or output.
+fn draw_running(
+    frame: &mut Frame,
+    area: Rect,
+    title: &str,
+    files: &[FileRun],
+    cancelling: bool,
+    scroll: &mut Scroll,
+) {
     let block = panel(title);
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
-    let [status_area, _, rows_area] = Layout::vertical([
+    let [status_area, _, lines_area] = Layout::vertical([
         Constraint::Length(1),
         Constraint::Length(1),
         Constraint::Fill(1),
@@ -1091,36 +1138,32 @@ fn draw_running(frame: &mut Frame, area: Rect, title: &str, files: &[FileRun], c
         .map(|run| File(&run.file).display().width() + 2)
         .max()
         .unwrap_or(0)
-        .min(usize::from(rows_area.width) / 2);
-    let name_width = u16::try_from(name_width).unwrap_or(u16::MAX);
+        .min(usize::from(lines_area.width) / 2);
+    let (lines, running) = result_lines(files, name_width);
+    let text_area = draw_lines(frame, lines_area, &lines, scroll);
 
-    let height = usize::from(rows_area.height);
-    let first = first_visible(files, height);
-    let rows = Layout::vertical(vec![Constraint::Length(1); height]).split(rows_area);
-    for (run, &row) in files[first..].iter().zip(rows.iter()) {
-        let [name_area, _, progress_area] = Layout::horizontal([
-            Constraint::Length(name_width),
-            Constraint::Length(1),
-            Constraint::Fill(1),
-        ])
-        .areas(row);
-        let name = run.file.file_name().unwrap_or(run.file.as_os_str());
-        let width = usize::from(name_width).saturating_sub(2);
-        let name = Line::from(vec![
-            state_mark(&run.state),
-            File::style(&truncate_left(&name.to_string_lossy(), width)),
-        ]);
-        frame.render_widget(name, name_area);
-        if let FileState::Running(progress) = &run.state {
-            draw_progress(frame, progress_area, progress.borrow().clone());
+    // Each running file's progress goes beside its name, on whichever row that line lands.
+    let gap = u16::try_from(name_width + 1).unwrap_or(u16::MAX);
+    let mut row: usize = 0;
+    let mut running = running.into_iter().peekable();
+    for (i, line) in lines.iter().enumerate() {
+        if let Some((_, progress)) = running.next_if(|&(line, _)| line == i)
+            && let Some(y) = row.checked_sub(scroll.offset)
+            && let Ok(y) = u16::try_from(y)
+            && y < text_area.height
+        {
+            let area = Rect {
+                x: text_area.x + gap,
+                y: text_area.y + y,
+                width: text_area.width.saturating_sub(gap),
+                height: 1,
+            };
+            draw_progress(frame, area, progress.borrow().clone());
         }
+        row += Paragraph::new(line.clone())
+            .wrap(Wrap { trim: false })
+            .line_count(text_area.width);
     }
-}
-
-/// The first row to show, so a batch taller than `height` keeps its running files in view.
-fn first_visible(files: &[FileRun], height: usize) -> usize {
-    let first_unfinished = files.iter().position(|f| !f.is_finished()).unwrap_or(0);
-    first_unfinished.min(files.len().saturating_sub(height))
 }
 
 fn state_mark(state: &FileState) -> Span<'static> {
@@ -1179,39 +1222,48 @@ fn draw_output(
     area: Rect,
     title: &str,
     lines: &[Line<'static>],
-    scroll: &mut usize,
-    viewport: &mut usize,
+    scroll: &mut Scroll,
 ) {
     // No side borders, so selecting text in the terminal copies clean lines.
     let block = panel(title);
     let inner = block.inner(area);
     frame.render_widget(block, area);
+    draw_lines(frame, inner, lines, scroll);
+}
 
+/// Draws `lines` wrapped and scrolled, with a scrollbar when they overflow, and returns the area
+/// the text takes.
+fn draw_lines(frame: &mut Frame, area: Rect, lines: &[Line<'static>], scroll: &mut Scroll) -> Rect {
     // A fixed scrollbar column keeps the wrap width, and so the row count, independent of
     // whether the scrollbar shows.
-    let [text_area, scrollbar_area] =
-        Layout::horizontal([Constraint::Fill(1), Constraint::Length(1)]).areas(inner);
+    let [text_area, _, scrollbar_area] = Layout::horizontal([
+        Constraint::Fill(1),
+        Constraint::Length(1),
+        Constraint::Length(1),
+    ])
+    .areas(area);
     let paragraph = Paragraph::new(lines.to_vec()).wrap(Wrap { trim: false });
 
     // Clamped here, where the viewport size is known, so key handlers can overshoot freely.
-    *viewport = usize::from(text_area.height);
+    scroll.viewport = usize::from(text_area.height);
     let max_scroll = paragraph
         .line_count(text_area.width)
-        .saturating_sub(*viewport);
-    *scroll = (*scroll).min(max_scroll);
+        .saturating_sub(scroll.viewport);
+    scroll.offset = scroll.offset.min(max_scroll);
 
-    let offset = u16::try_from(*scroll).unwrap_or(u16::MAX);
+    let offset = u16::try_from(scroll.offset).unwrap_or(u16::MAX);
     frame.render_widget(paragraph.scroll((offset, 0)), text_area);
 
     if max_scroll > 0 {
         // One position per possible scroll offset, so the thumb reaches the end at max_scroll.
-        let mut state = ScrollbarState::new(max_scroll + 1).position(*scroll);
+        let mut state = ScrollbarState::new(max_scroll + 1).position(scroll.offset);
         frame.render_stateful_widget(
             Scrollbar::new(ScrollbarOrientation::VerticalRight),
             scrollbar_area,
             &mut state,
         );
     }
+    text_area
 }
 
 /// A file the TUI names, which it shows in bold wherever it appears.
@@ -1267,6 +1319,7 @@ mod tests {
             run,
             cancel,
             cancelling: false,
+            scroll: Scroll::default(),
         };
         app
     }
@@ -1314,7 +1367,7 @@ mod tests {
         };
         assert_eq!(
             lines.iter().map(ToString::to_string).collect::<Vec<_>>(),
-            ["a.mkv", "a", "", "b.mkv", "b"]
+            ["✓ a.mkv", "a", "", "✓ b.mkv", "b"]
         );
     }
 
@@ -1351,7 +1404,7 @@ mod tests {
         };
         assert_eq!(
             lines.iter().map(ToString::to_string).collect::<Vec<_>>(),
-            ["a.mkv", "done", "", "b.mkv", "Skipped."]
+            ["✓ a.mkv", "done", "", "- b.mkv", "Skipped."]
         );
     }
 
@@ -1495,7 +1548,7 @@ mod tests {
         };
         assert_eq!(
             lines.iter().map(ToString::to_string).collect::<Vec<_>>(),
-            ["a.mkv", "kept", "", "b.mkv", "Skipped."]
+            ["✓ a.mkv", "kept", "", "- b.mkv", "Skipped."]
         );
     }
 
@@ -1626,20 +1679,37 @@ mod tests {
     }
 
     #[test]
-    fn keeps_running_files_in_view_of_a_short_screen() {
-        let files: Vec<FileRun> = ["a", "b", "c", "d"]
-            .map(|name| {
-                let mut run = FileRun::waiting(name.into());
-                if name < "c" {
-                    run.state = FileState::Finished(Finished::Skipped);
-                }
-                run
-            })
-            .into();
+    fn shows_each_file_as_it_finishes() {
+        let mut app = running_on(
+            &["/videos/a.mkv", "/videos/b.mkv", "/videos/c.mkv"],
+            Job::SyncCheck,
+            RunId(0),
+            CancellationToken::new(),
+        );
+        let (_, progress) = watch::channel(None);
+        let _ = app.on_event(RunId(0), 2, FileEvent::Started(progress));
+        let _ = finish(&mut app, RunId(0), 1, output("b"));
 
-        assert_eq!(first_visible(&files, 1), 2);
-        assert_eq!(first_visible(&files, 3), 1);
-        assert_eq!(first_visible(&files, 10), 0);
+        let Screen::Running { files, .. } = &app.screen else {
+            panic!("expected the run");
+        };
+        let (lines, running) = result_lines(files, 6);
+        assert_eq!(
+            (
+                lines.iter().map(ToString::to_string).collect::<Vec<_>>(),
+                running.iter().map(|&(line, _)| line).collect::<Vec<_>>()
+            ),
+            (
+                vec![
+                    "· a.mkv".to_string(),
+                    "✓ b.mkv".into(),
+                    "b".into(),
+                    "".into(),
+                    "› …mkv".into()
+                ],
+                vec![4]
+            )
+        );
     }
 
     fn press(app: &mut App, codes: &[KeyCode]) {
