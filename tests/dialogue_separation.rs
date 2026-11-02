@@ -473,6 +473,21 @@ fn fails_without_a_transcript() {
 }
 
 #[test]
+fn fails_when_one_transcript_is_given_for_several_files() {
+    let workspace = Workspace::transcribed("clean-cfr.mp4");
+
+    assert_snapshot!(workspace.vt(&[
+        "clean-cfr.mp4",
+        "other.mp4",
+        "--keep",
+        "voice",
+        "--transcript",
+        "clean-cfr.srt"
+    ]));
+    assert_eq!(workspace.cache_entries(), Vec::<String>::new());
+}
+
+#[test]
 fn fails_on_a_malformed_transcript() {
     let workspace = Workspace::with("clean-cfr.mp4");
     workspace.write_transcript("clean-cfr.mp4", "1\nsoon --> later\nhello\n");

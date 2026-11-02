@@ -28,7 +28,7 @@ use crate::{
         protocol::{Message, Stats},
     },
     srt,
-    tools::{self, sync_check::thousands, transcribe},
+    tools::{self, Tool, cli::Printed, sync_check::thousands, transcribe},
 };
 use cache::{Cache, Entry, Key, Pending};
 use media::{AudioStream, Encoding, Output};
@@ -36,8 +36,9 @@ use speech::Span;
 
 #[derive(Debug, Args)]
 pub struct DialogueSeparationArgs {
-    /// Video or audio file to separate
-    file: PathBuf,
+    /// Video or audio files to separate
+    #[arg(required = true)]
+    files: Vec<PathBuf>,
 
     /// Which side of the separation to keep
     #[arg(long, value_enum)]
@@ -47,12 +48,12 @@ pub struct DialogueSeparationArgs {
     #[arg(long, value_enum, default_value_t = Backend::Tiger)]
     backend: Backend,
 
-    /// Transcript of the speech to separate, from `vt transcribe`. Defaults to FILE with an
-    /// `.srt` extension.
+    /// Transcript of the speech to separate, from `vt transcribe`, when separating one file.
+    /// Defaults to each file with an `.srt` extension.
     #[arg(long)]
     transcript: Option<PathBuf>,
 
-    /// Replace an existing output
+    /// Replace existing outputs
     #[arg(long)]
     force: bool,
 }
@@ -168,22 +169,35 @@ impl Backend {
 }
 
 pub async fn cli(args: &DialogueSeparationArgs) -> Result<ExitCode> {
+    if args.transcript.is_some() && args.files.len() > 1 {
+        bail!("--transcript takes one file, but got {}", args.files.len());
+    }
     let cancel = CancellationToken::new();
-    let transcript = args
-        .transcript
-        .clone()
-        .unwrap_or_else(|| transcribe::transcript_path(&args.file));
-    let run = run(
-        &args.file,
-        &transcript,
-        args.keep,
-        args.backend,
-        args.force,
-        &cancel,
-        |progress| ml::cli::show_progress(&progress),
-    );
-    let run = async { run.await.map_err(tools::suggest_force) };
-    ml::cli::run(&cancel, run, |outcome| outcome.lines()).await
+    tools::cli::run(Tool::DialogueSeparation, &args.files, &cancel, |file| {
+        let cancel = &cancel;
+        async move {
+            let transcript = args
+                .transcript
+                .clone()
+                .unwrap_or_else(|| transcribe::transcript_path(file));
+            let outcome = run(
+                file,
+                &transcript,
+                args.keep,
+                args.backend,
+                args.force,
+                cancel,
+                |progress| tools::cli::show_progress(file, &progress),
+            )
+            .await
+            .map_err(tools::suggest_force)?;
+            Ok(Printed {
+                stdout: outcome.lines(),
+                ..Printed::default()
+            })
+        }
+    })
+    .await
 }
 
 #[derive(Debug, Clone, PartialEq)]

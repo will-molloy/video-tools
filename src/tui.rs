@@ -1,6 +1,7 @@
 //! Interactive shell over the same tool functions the CLI calls.
 
 use std::{
+    collections::BTreeSet,
     ops::ControlFlow,
     path::{Path, PathBuf},
     time::Duration,
@@ -8,7 +9,7 @@ use std::{
 
 use anyhow::{Context, Result};
 use crossterm::event::{Event, EventStream, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
-use futures::StreamExt;
+use futures::{StreamExt, stream};
 use ratatui::{
     DefaultTerminal, Frame,
     layout::{Constraint, Layout, Rect},
@@ -63,13 +64,71 @@ pub async fn run() -> Result<()> {
 
 type ToolOutput = Vec<Line<'static>>;
 
-/// How a tool run ended.
+/// How a tool's run on one file ended.
 #[derive(Debug)]
 enum Finished {
     Output(ToolOutput),
+    Failed(ToolOutput),
 
     /// The tool stopped before replacing this file.
     Exists(PathBuf),
+
+    /// Cancelling or declining to overwrite stopped the tool on this file.
+    Skipped,
+}
+
+/// The latest progress of one file. It holds the latest report only, so the tool never waits on
+/// the UI.
+type ProgressRx = watch::Receiver<Option<Progress>>;
+
+/// News of one file in a run.
+#[derive(Debug)]
+enum FileEvent {
+    Started(ProgressRx),
+    Finished(Finished),
+}
+
+/// One file in a run.
+#[derive(Debug)]
+struct FileRun {
+    file: PathBuf,
+    state: FileState,
+}
+
+#[derive(Debug)]
+enum FileState {
+    Waiting,
+    Running(ProgressRx),
+
+    Finished(Finished),
+}
+
+impl FileRun {
+    fn waiting(file: PathBuf) -> Self {
+        FileRun {
+            file,
+            state: FileState::Waiting,
+        }
+    }
+
+    fn is_finished(&self) -> bool {
+        matches!(self.state, FileState::Finished(_))
+    }
+
+    fn has_output(&self) -> bool {
+        matches!(
+            self.state,
+            FileState::Finished(Finished::Output(_) | Finished::Failed(_))
+        )
+    }
+
+    /// The output this file would replace, if it stopped to ask.
+    fn existing_output(&self) -> Option<&Path> {
+        match &self.state {
+            FileState::Finished(Finished::Exists(output)) => Some(output),
+            _ => None,
+        }
+    }
 }
 
 /// The latest progress report from whichever tool is running.
@@ -88,35 +147,47 @@ struct App {
     dir: PathBuf,
     files: Vec<PathBuf>,
 
-    /// Lives outside `Screen` so the selection survives a round trip into a tool.
+    // These live outside `Screen` so the picks survive a round trip into a tool.
+    tool_list: ListState,
     file_list: ListState,
+    checked: BTreeSet<usize>,
+    keep: Keep,
+    backend: Backend,
+    option: OptionRow,
 
     screen: Screen,
     next_run: u64,
-    results_tx: UnboundedSender<(RunId, Finished)>,
+    results_tx: UnboundedSender<RunEvent>,
 
     /// Set by Ctrl-C while a tool runs. The TUI exits once the tool has cleaned up.
     quitting: bool,
 }
 
+/// News from a run, naming the file by its index in the run.
+type RunEvent = (RunId, usize, FileEvent);
+
+/// The pane of the picker that takes the keys.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Focus {
+    Tools,
+    Options,
+    Files,
+}
+
+/// A row of the options for the picked tool.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OptionRow {
+    Keep,
+    Backend,
+}
+
 enum Screen {
-    PickFile,
-    PickTool {
-        file: PathBuf,
-        list: ListState,
-    },
-    PickKeep {
-        file: PathBuf,
-        list: ListState,
-    },
-    PickBackend {
-        file: PathBuf,
-        keep: Keep,
-        list: ListState,
+    Pick {
+        focus: Focus,
     },
     Running {
-        file: PathBuf,
         job: Job,
+        files: Vec<FileRun>,
         run: RunId,
         cancel: CancellationToken,
 
@@ -124,38 +195,61 @@ enum Screen {
         /// subprocess can't outlive its screen.
         cancelling: bool,
 
-        /// Holds the latest report only, so the tool never waits on the UI.
-        progress: watch::Receiver<Option<Progress>>,
+        scroll: Scroll,
     },
     ConfirmOverwrite {
-        file: PathBuf,
         job: Job,
-        output: PathBuf,
+        files: Vec<FileRun>,
     },
     Output {
-        file: PathBuf,
         job: Job,
+        files: Vec<FileRun>,
         lines: ToolOutput,
-
-        /// May overshoot; `draw_output` clamps it to the content.
-        scroll: usize,
-
-        /// Set by `draw_output` so paging can move a screenful.
-        viewport: usize,
+        scroll: Scroll,
     },
 }
 
+/// Where a pane of lines has scrolled to.
+#[derive(Debug, Default, Clone, Copy)]
+struct Scroll {
+    /// May overshoot; `draw_lines` clamps it to the content.
+    offset: usize,
+
+    /// Set by `draw_lines` so paging can move a screenful.
+    viewport: usize,
+}
+
+impl Scroll {
+    fn on_key(&mut self, code: KeyCode) {
+        // Keep one line of overlap so paging doesn't lose your place.
+        let page = self.viewport.saturating_sub(1).max(1);
+        let offset = &mut self.offset;
+        match code {
+            KeyCode::Down | KeyCode::Char('j') => *offset = offset.saturating_add(1),
+            KeyCode::Up | KeyCode::Char('k') => *offset = offset.saturating_sub(1),
+            KeyCode::PageDown | KeyCode::Char(' ') => *offset = offset.saturating_add(page),
+            KeyCode::PageUp => *offset = offset.saturating_sub(page),
+            KeyCode::Home | KeyCode::Char('g') => *offset = 0,
+            KeyCode::End | KeyCode::Char('G') => *offset = usize::MAX,
+            _ => {}
+        }
+    }
+}
+
 impl App {
-    fn new(
-        dir: PathBuf,
-        files: Vec<PathBuf>,
-        results_tx: UnboundedSender<(RunId, Finished)>,
-    ) -> Self {
+    fn new(dir: PathBuf, files: Vec<PathBuf>, results_tx: UnboundedSender<RunEvent>) -> Self {
         App {
+            tool_list: ListState::default().with_selected(first_index(&Tool::ALL)),
             file_list: ListState::default().with_selected(first_index(&files)),
+            checked: BTreeSet::new(),
+            keep: Keep::CHOICES[0],
+            backend: Backend::CHOICES[0],
+            option: OptionRow::Keep,
             dir,
             files,
-            screen: Screen::PickFile,
+            screen: Screen::Pick {
+                focus: Focus::Tools,
+            },
             next_run: 0,
             results_tx,
             quitting: false,
@@ -165,7 +259,7 @@ impl App {
     async fn run(
         mut self,
         terminal: &mut DefaultTerminal,
-        mut results_rx: UnboundedReceiver<(RunId, Finished)>,
+        mut results_rx: UnboundedReceiver<RunEvent>,
     ) -> Result<()> {
         let mut events = EventStream::new();
         let mut redraw = time::interval(PROGRESS_REDRAW);
@@ -184,8 +278,8 @@ impl App {
                         return Ok(());
                     }
                 }
-                Some((run, finished)) = results_rx.recv() => {
-                    if self.on_result(run, finished).is_break() {
+                Some((run, index, event)) = results_rx.recv() => {
+                    if self.on_event(run, index, event).is_break() {
                         return Ok(());
                     }
                 }
@@ -206,124 +300,135 @@ impl App {
         // Each arm returns the next screen, or None to stay put. Building the next screen from
         // clones lets the `&mut self.screen` borrow end before the assignment below.
         let next = match &mut self.screen {
-            Screen::PickFile => {
+            Screen::Pick {
+                focus: focus @ Focus::Tools,
+            } => {
                 if back {
                     return ControlFlow::Break(());
                 }
+                navigate(&mut self.tool_list, key.code);
+                if matches!(key.code, KeyCode::Enter | KeyCode::Tab) {
+                    *focus = if has_options(&self.tool_list) {
+                        Focus::Options
+                    } else {
+                        Focus::Files
+                    };
+                }
+                None
+            }
+            Screen::Pick {
+                focus: focus @ Focus::Options,
+            } => {
+                match key.code {
+                    KeyCode::Enter | KeyCode::Tab => *focus = Focus::Files,
+                    _ if back => *focus = Focus::Tools,
+                    KeyCode::Up | KeyCode::Char('k') => self.option = OptionRow::Keep,
+                    KeyCode::Down | KeyCode::Char('j') => self.option = OptionRow::Backend,
+                    KeyCode::Left | KeyCode::Char('h') => self.change_option(false),
+                    KeyCode::Right | KeyCode::Char('l' | ' ') => self.change_option(true),
+                    _ => {}
+                }
+                None
+            }
+            Screen::Pick {
+                focus: focus @ Focus::Files,
+            } => {
                 navigate(&mut self.file_list, key.code);
-                (key.code == KeyCode::Enter)
-                    .then(|| self.file_list.selected())
-                    .flatten()
-                    .map(|i| Screen::PickTool {
-                        file: self.files[i].clone(),
-                        list: ListState::default().with_selected(first_index(&Tool::ALL)),
-                    })
-            }
-            Screen::PickTool { file, list } => {
-                if back {
-                    Some(Screen::PickFile)
-                } else {
-                    navigate(list, key.code);
-                    let selected = list.selected().and_then(|i| Tool::ALL.get(i));
-                    match (key.code, selected) {
-                        (KeyCode::Enter, Some(&tool)) => {
-                            let file: &PathBuf = file;
-                            let mut start = |job| {
-                                start(
-                                    &mut self.next_run,
-                                    &self.results_tx,
-                                    file.clone(),
-                                    job,
-                                    false,
-                                )
-                            };
-                            Some(match tool {
-                                Tool::Chapters => start(Job::Chapters),
-                                Tool::SyncCheck => start(Job::SyncCheck),
-                                Tool::Transcribe => start(Job::Transcribe),
-                                Tool::DialogueSeparation => keep_picker(file.clone(), None),
-                            })
+                match key.code {
+                    KeyCode::Tab => *focus = Focus::Tools,
+                    _ if back => {
+                        *focus = if has_options(&self.tool_list) {
+                            Focus::Options
+                        } else {
+                            Focus::Tools
+                        };
+                    }
+                    KeyCode::Char(' ') => {
+                        if let Some(i) = self.file_list.selected().filter(|&i| i < self.files.len())
+                            && !self.checked.remove(&i)
+                        {
+                            self.checked.insert(i);
                         }
-                        _ => None,
                     }
+                    KeyCode::Char('a') => {
+                        if self.checked.len() == self.files.len() {
+                            self.checked.clear();
+                        } else {
+                            self.checked = (0..self.files.len()).collect();
+                        }
+                    }
+                    _ => {}
+                }
+                let picked = picked(&self.files, &self.checked, &self.file_list);
+                let tool = self.tool_list.selected().and_then(|i| Tool::ALL.get(i));
+                match (key.code, tool) {
+                    (KeyCode::Enter, Some(&tool)) if !picked.is_empty() => {
+                        let mut start = |job| {
+                            start(
+                                &mut self.next_run,
+                                &self.results_tx,
+                                job,
+                                picked.iter().cloned().map(FileRun::waiting).collect(),
+                                false,
+                            )
+                        };
+                        Some(match tool {
+                            Tool::Chapters => start(Job::Chapters),
+                            Tool::SyncCheck => start(Job::SyncCheck),
+                            Tool::Transcribe => start(Job::Transcribe),
+                            Tool::DialogueSeparation => {
+                                start(Job::Separate(self.keep, self.backend))
+                            }
+                        })
+                    }
+                    _ => None,
                 }
             }
-            Screen::PickKeep { file, list } => {
-                if back {
-                    Some(tool_picker(file.clone(), Tool::DialogueSeparation))
-                } else {
-                    navigate(list, key.code);
-                    let selected = list.selected().and_then(|i| Keep::CHOICES.get(i));
-                    match (key.code, selected) {
-                        (KeyCode::Enter, Some(&keep)) => Some(backend_picker(file.clone(), keep)),
-                        _ => None,
+            Screen::ConfirmOverwrite { job, files } => match key.code {
+                KeyCode::Char('y') => {
+                    let mut files = std::mem::take(files);
+                    for run in &mut files {
+                        if run.existing_output().is_some() {
+                            run.state = FileState::Waiting;
+                        }
                     }
+                    Some(start(
+                        &mut self.next_run,
+                        &self.results_tx,
+                        *job,
+                        files,
+                        true,
+                    ))
                 }
-            }
-            Screen::PickBackend { file, keep, list } => {
-                if back {
-                    Some(keep_picker(file.clone(), Some(*keep)))
-                } else {
-                    navigate(list, key.code);
-                    let selected = list.selected().and_then(|i| Backend::CHOICES.get(i));
-                    match (key.code, selected) {
-                        (KeyCode::Enter, Some(&backend)) => Some(start(
-                            &mut self.next_run,
-                            &self.results_tx,
-                            file.clone(),
-                            Job::Separate(*keep, backend),
-                            false,
-                        )),
-                        _ => None,
-                    }
+                KeyCode::Char('n') => {
+                    Some(conclude(*job, std::mem::take(files), Scroll::default()))
                 }
-            }
-            Screen::ConfirmOverwrite { file, job, .. } => match key.code {
-                KeyCode::Char('y') => Some(start(
-                    &mut self.next_run,
-                    &self.results_tx,
-                    file.clone(),
-                    *job,
-                    true,
-                )),
-                KeyCode::Char('n') => Some(tool_picker(file.clone(), job.tool())),
-                _ if back => Some(tool_picker(file.clone(), job.tool())),
+                _ if back => Some(conclude(*job, std::mem::take(files), Scroll::default())),
                 _ => None,
             },
             Screen::Running {
-                cancel, cancelling, ..
+                cancel,
+                cancelling,
+                scroll,
+                ..
             } => {
                 // The task stops its subprocesses and cleans up, then its result moves this
                 // screen on.
                 if back {
                     cancel.cancel();
                     *cancelling = true;
+                } else {
+                    scroll.on_key(key.code);
                 }
                 None
             }
-            Screen::Output {
-                file,
-                job,
-                scroll,
-                viewport,
-                ..
-            } => {
+            Screen::Output { scroll, .. } => {
                 if back {
-                    Some(tool_picker(file.clone(), job.tool()))
+                    Some(Screen::Pick {
+                        focus: Focus::Files,
+                    })
                 } else {
-                    // Keep one line of overlap so paging doesn't lose your place.
-                    let page = viewport.saturating_sub(1).max(1);
-                    match key.code {
-                        KeyCode::Down | KeyCode::Char('j') => *scroll = scroll.saturating_add(1),
-                        KeyCode::Up | KeyCode::Char('k') => *scroll = scroll.saturating_sub(1),
-                        KeyCode::PageDown | KeyCode::Char(' ') => {
-                            *scroll = scroll.saturating_add(page);
-                        }
-                        KeyCode::PageUp => *scroll = scroll.saturating_sub(page),
-                        KeyCode::Home | KeyCode::Char('g') => *scroll = 0,
-                        KeyCode::End | KeyCode::Char('G') => *scroll = usize::MAX,
-                        _ => {}
-                    }
+                    scroll.on_key(key.code);
                     None
                 }
             }
@@ -335,36 +440,101 @@ impl App {
         ControlFlow::Continue(())
     }
 
-    fn on_result(&mut self, run: RunId, finished: Finished) -> ControlFlow<()> {
-        if let Screen::Running {
-            file,
+    /// Moves the focused option to its next or previous choice.
+    fn change_option(&mut self, forward: bool) {
+        match self.option {
+            OptionRow::Keep => self.keep = cycle(&Keep::CHOICES, self.keep, forward),
+            OptionRow::Backend => self.backend = cycle(&Backend::CHOICES, self.backend, forward),
+        }
+    }
+
+    fn on_event(&mut self, run: RunId, index: usize, event: FileEvent) -> ControlFlow<()> {
+        let Screen::Running {
             job,
+            files,
             run: current,
             cancelling,
+            scroll,
             ..
-        } = &self.screen
-            && *current == run
-        {
-            if self.quitting {
-                return ControlFlow::Break(());
-            }
-            self.screen = match finished {
-                _ if *cancelling => tool_picker(file.clone(), job.tool()),
-                Finished::Output(lines) => Screen::Output {
-                    file: file.clone(),
-                    job: *job,
-                    lines,
-                    scroll: 0,
-                    viewport: 0,
-                },
-                Finished::Exists(output) => Screen::ConfirmOverwrite {
-                    file: file.clone(),
-                    job: *job,
-                    output,
-                },
+        } = &mut self.screen
+        else {
+            return ControlFlow::Continue(());
+        };
+        if *current != run {
+            return ControlFlow::Continue(());
+        }
+        if let Some(file) = files.get_mut(index) {
+            file.state = match event {
+                FileEvent::Started(progress) => FileState::Running(progress),
+                FileEvent::Finished(finished) => FileState::Finished(finished),
             };
         }
+        if !files.iter().all(FileRun::is_finished) {
+            return ControlFlow::Continue(());
+        }
+        if self.quitting {
+            return ControlFlow::Break(());
+        }
+        let job = *job;
+        let files = std::mem::take(files);
+        self.screen = if !*cancelling && files.iter().any(|f| f.existing_output().is_some()) {
+            Screen::ConfirmOverwrite { job, files }
+        } else {
+            conclude(job, files, *scroll)
+        };
         ControlFlow::Continue(())
+    }
+
+    /// Draws the tools, any options for the picked tool, then the files, marking the row that
+    /// takes the keys in the focused pane.
+    fn draw_picker(&mut self, frame: &mut Frame, area: Rect, focus: Focus) {
+        let tools_height = u16::try_from(Tool::ALL.len()).unwrap_or(u16::MAX) + 1;
+        let picked = focus != Focus::Tools;
+        let options_height = if picked && has_options(&self.tool_list) {
+            3
+        } else {
+            0
+        };
+        let [tools_area, options_area, files_area] = Layout::vertical([
+            Constraint::Length(tools_height),
+            Constraint::Length(options_height),
+            Constraint::Fill(1),
+        ])
+        .areas(area);
+
+        let rows = Tool::ALL.map(|t| (t.name(), t.summary()));
+        let style = match focus {
+            Focus::Tools => highlight(),
+
+            // Keeps the picked tool visible while the keys move on.
+            Focus::Options | Focus::Files => picked_style(),
+        };
+        draw_choices(
+            frame,
+            tools_area,
+            panel("Pick a tool"),
+            &rows,
+            &mut self.tool_list,
+            style,
+        );
+        if options_height > 0 {
+            draw_options(
+                frame,
+                options_area,
+                focus,
+                self.keep,
+                self.backend,
+                self.option,
+            );
+        }
+        draw_files(
+            frame,
+            files_area,
+            focus,
+            &self.files,
+            &self.checked,
+            &mut self.file_list,
+        );
     }
 
     fn draw(&mut self, frame: &mut Frame) {
@@ -376,24 +546,16 @@ impl App {
         .areas(frame.area());
 
         let crumbs = match &self.screen {
-            Screen::PickFile => {
+            Screen::Pick { .. } => {
                 let prefix = HEADER_LOGO.chars().count() + HEADER_SEPARATOR.chars().count();
                 let width = usize::from(header.width).saturating_sub(prefix);
                 vec![Span::from(truncate_left(&tilde(&self.dir), width))]
             }
-            Screen::PickTool { file, .. } => vec![File(file).display()],
-            Screen::PickKeep { file, .. } => {
-                vec![File(file).display(), Tool::DialogueSeparation.name().into()]
-            }
-            Screen::PickBackend { file, keep, .. } => vec![
-                File(file).display(),
-                Tool::DialogueSeparation.name().into(),
-                keep.label().into(),
-            ],
-            Screen::Running { file, job, .. }
-            | Screen::ConfirmOverwrite { file, job, .. }
-            | Screen::Output { file, job, .. } => {
-                let mut crumbs = vec![File(file).display(), job.tool().name().into()];
+            Screen::Running { files, job, .. }
+            | Screen::ConfirmOverwrite { files, job, .. }
+            | Screen::Output { files, job, .. } => {
+                let paths: Vec<PathBuf> = files.iter().map(|f| f.file.clone()).collect();
+                let mut crumbs = vec![subject(&paths), job.tool().name().into()];
                 crumbs.extend(subtitle(*job).map(Span::from));
                 crumbs
             }
@@ -401,58 +563,51 @@ impl App {
         frame.render_widget(header_line(crumbs), header);
 
         let hints = match &mut self.screen {
-            Screen::PickFile => {
-                draw_files(frame, body, &self.files, &mut self.file_list);
-                "↑↓ move · Enter open · q quit"
-            }
-            Screen::PickTool { list, .. } => {
-                draw_tools(frame, body, list);
-                "↑↓ move · Enter run · q back"
-            }
-            Screen::PickKeep { list, .. } => {
-                let rows = Keep::CHOICES.map(|k| (k.label(), k.summary()));
-                draw_choices(frame, body, panel("Pick what to remove"), &rows, list);
-                "↑↓ move · Enter pick · q back"
-            }
-            Screen::PickBackend { list, .. } => {
-                let rows = Backend::CHOICES.map(|b| (b.label(), b.summary()));
-                draw_choices(frame, body, panel("Pick a model"), &rows, list);
-                "↑↓ move · Enter run · q back"
+            Screen::Pick { focus } => {
+                let focus = *focus;
+                self.draw_picker(frame, body, focus);
+                match focus {
+                    Focus::Tools => "↑↓ move · Enter next · q quit",
+                    Focus::Options => "↑↓ move · ←→ change · Enter files · q back",
+                    Focus::Files => "↑↓ move · Space select · a all · Enter run · q back",
+                }
             }
             Screen::Running {
-                file,
                 job,
-                progress,
+                files,
                 cancelling,
+                scroll,
                 ..
             } => {
-                let progress = progress.borrow().clone();
-                let title = title(*job);
-                draw_running(frame, body, &title, file, progress, *cancelling);
+                draw_running(frame, body, &title(*job), files, *cancelling, scroll);
                 if *cancelling {
                     "Cancelling…"
                 } else {
-                    "Esc cancel"
+                    "↑↓ PgUp PgDn scroll · Esc cancel"
                 }
             }
-            Screen::ConfirmOverwrite { job, output, .. } => {
-                let question = Line::from(vec![
-                    File(output).display(),
-                    Span::from(" already exists. Overwrite it?"),
-                ]);
+            Screen::ConfirmOverwrite { job, files } => {
+                let mut question: Vec<Line> = files
+                    .iter()
+                    .filter_map(FileRun::existing_output)
+                    .map(|output| {
+                        Line::from(vec![File(output).display(), Span::from(" already exists.")])
+                    })
+                    .collect();
+                question.push(Line::from(if question.len() == 1 {
+                    "Overwrite it?"
+                } else {
+                    "Overwrite them?"
+                }));
                 let paragraph = Paragraph::new(question).wrap(Wrap { trim: true });
                 let title = title(*job);
                 frame.render_widget(paragraph.yellow().block(panel(&title)), body);
                 "y overwrite · n back"
             }
             Screen::Output {
-                job,
-                lines,
-                scroll,
-                viewport,
-                ..
+                job, lines, scroll, ..
             } => {
-                draw_output(frame, body, &title(*job), lines, scroll, viewport);
+                draw_output(frame, body, &title(*job), lines, scroll);
                 "↑↓ PgUp PgDn scroll · q back"
             }
         };
@@ -460,32 +615,113 @@ impl App {
     }
 }
 
-fn tool_picker(file: PathBuf, tool: Tool) -> Screen {
-    let index = Tool::ALL.iter().position(|&t| t == tool);
-    Screen::PickTool {
-        file,
-        list: ListState::default().with_selected(index),
+/// The files a run covers, which are the checked ones, or the highlighted one if none are checked.
+fn picked(files: &[PathBuf], checked: &BTreeSet<usize>, highlighted: &ListState) -> Vec<PathBuf> {
+    if checked.is_empty() {
+        highlighted
+            .selected()
+            .and_then(|i| files.get(i))
+            .cloned()
+            .into_iter()
+            .collect()
+    } else {
+        checked.iter().map(|&i| files[i].clone()).collect()
     }
 }
 
-/// Asks what a separation removes, with `keep` selected, or the first choice.
-fn keep_picker(file: PathBuf, keep: Option<Keep>) -> Screen {
-    let index = keep.map_or(first_index(&Keep::CHOICES), |keep| {
-        Keep::CHOICES.iter().position(|&k| k == keep)
-    });
-    Screen::PickKeep {
-        file,
-        list: ListState::default().with_selected(index),
+/// A crumb naming the files a run covers.
+fn subject(files: &[PathBuf]) -> Span<'static> {
+    match files {
+        [file] => File(file).display(),
+        files => Span::from(format!("{} files", files.len())),
     }
 }
 
-/// Asks which model separates the file, offering the default first.
-fn backend_picker(file: PathBuf, keep: Keep) -> Screen {
-    Screen::PickBackend {
-        file,
-        keep,
-        list: ListState::default().with_selected(first_index(&Backend::CHOICES)),
+/// Ends a run with the output of its files, or back at the picker if it has no output to show.
+fn conclude(job: Job, mut files: Vec<FileRun>, scroll: Scroll) -> Screen {
+    for run in &mut files {
+        if run.existing_output().is_some() {
+            run.state = FileState::Finished(Finished::Skipped);
+        }
     }
+    if !files.iter().any(FileRun::has_output) {
+        return Screen::Pick {
+            focus: Focus::Files,
+        };
+    }
+    Screen::Output {
+        job,
+        lines: output_lines(&files),
+        files,
+        scroll,
+    }
+}
+
+/// The output of each file, under its name when there are several.
+fn output_lines(files: &[FileRun]) -> ToolOutput {
+    if let [
+        FileRun {
+            state: FileState::Finished(Finished::Output(lines) | Finished::Failed(lines)),
+            ..
+        },
+    ] = files
+    {
+        return lines.clone();
+    }
+    result_lines(files, 0).0
+}
+
+/// Each file's name, marked with its state, then any output, in the order of the run. Also
+/// returns the line of each running file, whose name is cut to `name_width` to leave room for its
+/// progress.
+fn result_lines(files: &[FileRun], name_width: usize) -> (ToolOutput, Vec<(usize, &ProgressRx)>) {
+    let mut lines = vec![];
+    let mut running = vec![];
+    let mut spaced = true;
+    for run in files {
+        if !spaced {
+            lines.push(Line::default());
+        }
+        let name = match &run.state {
+            FileState::Running(progress) => {
+                running.push((lines.len(), progress));
+                let name = run.file.file_name().unwrap_or(run.file.as_os_str());
+                let width = name_width.saturating_sub(2);
+                File::style(&truncate_left(&name.to_string_lossy(), width))
+            }
+            FileState::Waiting | FileState::Finished(_) => File(&run.file).display(),
+        };
+        lines.push(Line::from(vec![state_mark(&run.state), name]));
+
+        let output = match &run.state {
+            FileState::Waiting | FileState::Running(_) => vec![],
+            FileState::Finished(Finished::Output(output) | Finished::Failed(output)) => {
+                output.clone()
+            }
+            FileState::Finished(Finished::Exists(output)) => vec![
+                Line::from(vec![File(output).display(), Span::from(" already exists.")]).yellow(),
+            ],
+            FileState::Finished(Finished::Skipped) => vec![Line::from("Skipped.").dark_gray()],
+        };
+        spaced = output.is_empty();
+        lines.extend(output);
+    }
+    (lines, running)
+}
+
+/// Whether the tool highlighted in `tool_list` has options to set.
+fn has_options(tool_list: &ListState) -> bool {
+    match tool_list.selected().and_then(|i| Tool::ALL.get(i)) {
+        Some(Tool::DialogueSeparation) => true,
+        Some(Tool::Chapters | Tool::SyncCheck | Tool::Transcribe) | None => false,
+    }
+}
+
+/// The choice after `current`, or before it, wrapping around the ends.
+fn cycle<T: Copy + PartialEq>(choices: &[T], current: T, forward: bool) -> T {
+    let index = choices.iter().position(|&c| c == current).unwrap_or(0);
+    let step = if forward { 1 } else { choices.len() - 1 };
+    choices[(index + step) % choices.len()]
 }
 
 /// What a run does. Separation also needs the side and model the user picked.
@@ -521,35 +757,32 @@ fn title(job: Job) -> String {
     subtitle(job).unwrap_or_else(|| job.tool().name().into())
 }
 
-/// Spawns `job` as the next run and returns the screen that shows it. `force` lets the job
-/// replace its existing output.
+/// Spawns `job` as the next run on the waiting `files`, and returns the screen that shows it.
+/// `force` lets the job replace existing outputs.
 fn start(
     next_run: &mut u64,
-    results_tx: &UnboundedSender<(RunId, Finished)>,
-    file: PathBuf,
+    results_tx: &UnboundedSender<RunEvent>,
     job: Job,
+    files: Vec<FileRun>,
     force: bool,
 ) -> Screen {
     let run = RunId(*next_run);
     *next_run += 1;
     let cancel = CancellationToken::new();
-    let (progress_tx, progress) = watch::channel(None);
-    spawn_job(
-        job,
-        file.clone(),
-        force,
-        run,
-        cancel.clone(),
-        progress_tx,
-        results_tx.clone(),
-    );
+    let waiting = files
+        .iter()
+        .enumerate()
+        .filter(|(_, file)| matches!(file.state, FileState::Waiting))
+        .map(|(index, file)| (index, file.file.clone()))
+        .collect();
+    spawn_job(job, waiting, force, run, cancel.clone(), results_tx.clone());
     Screen::Running {
-        file,
         job,
+        files,
         run,
         cancel,
         cancelling: false,
-        progress,
+        scroll: Scroll::default(),
     }
 }
 
@@ -567,29 +800,47 @@ fn navigate(list: &mut ListState, code: KeyCode) {
     }
 }
 
-/// Runs a job in the background and sends its rendered output back to the event loop. The task
-/// is detached; `cancel` stops it.
+/// Runs a job on `files`, each with its index in the run, up to the tool's parallel limit at once,
+/// and sends each file's news back to the event loop. The next file starts as soon as any running
+/// file finishes. The task is detached; `cancel` stops it and skips the files not yet started.
 fn spawn_job(
     job: Job,
-    file: PathBuf,
+    files: Vec<(usize, PathBuf)>,
     force: bool,
     run: RunId,
     cancel: CancellationToken,
-    progress: watch::Sender<Option<Progress>>,
-    tx: UnboundedSender<(RunId, Finished)>,
+    tx: UnboundedSender<RunEvent>,
 ) {
     tokio::spawn(async move {
-        let finished = match run_job(job, &file, force, &cancel, &progress).await {
-            Ok(lines) => Finished::Output(lines),
-            Err(e) => match e.downcast::<tools::Exists>() {
-                Ok(tools::Exists(output)) => Finished::Exists(output),
-                Err(e) => Finished::Output(error_lines(&format!("Error: {e:#}"))),
-            },
-        };
-
-        // Fails only if the TUI has exited, in which case nobody needs the result.
-        let _ = tx.send((run, finished));
+        let (cancel, tx) = (&cancel, &tx);
+        stream::iter(files)
+            .for_each_concurrent(job.tool().max_parallel(), |(index, file)| async move {
+                // Sends fail only if the TUI has exited, in which case nobody needs the news.
+                let send = |event| {
+                    let _ = tx.send((run, index, event));
+                };
+                let finished = if cancel.is_cancelled() {
+                    Finished::Skipped
+                } else {
+                    let (progress_tx, progress) = watch::channel(None);
+                    send(FileEvent::Started(progress));
+                    finished(run_job(job, &file, force, cancel, &progress_tx).await)
+                };
+                send(FileEvent::Finished(finished));
+            })
+            .await;
     });
+}
+
+fn finished(result: Result<ToolOutput>) -> Finished {
+    match result {
+        Ok(lines) => Finished::Output(lines),
+        Err(e) if e.is::<Cancelled>() => Finished::Skipped,
+        Err(e) => match e.downcast::<tools::Exists>() {
+            Ok(tools::Exists(output)) => Finished::Exists(output),
+            Err(e) => Finished::Failed(error_lines(&format!("Error: {e:#}"))),
+        },
+    }
 }
 
 /// An error's message in red, then any detail below it, such as `vt-ml`'s stderr, in gray.
@@ -750,32 +1001,87 @@ fn highlight() -> Style {
         .add_modifier(Modifier::BOLD)
 }
 
-fn draw_files(frame: &mut Frame, area: Rect, files: &[PathBuf], state: &mut ListState) {
-    let block = panel("Pick a file");
+fn picked_style() -> Style {
+    Style::new().fg(Color::Cyan)
+}
+
+/// Draws a row per option, with its choices and what the current one does.
+fn draw_options(
+    frame: &mut Frame,
+    area: Rect,
+    focus: Focus,
+    keep: Keep,
+    backend: Backend,
+    row: OptionRow,
+) {
+    let line = |this: OptionRow, label: &str, choices: Vec<(&str, bool)>, summary: &str| {
+        let focused = focus == Focus::Options && row == this;
+        let mut spans = vec![Span::from(if focused { "› " } else { "  " })];
+        spans.push(Span::from(format!("{label:<8}")));
+        for (choice, chosen) in choices {
+            spans.push(match (chosen, focused) {
+                (true, true) => Span::styled(choice.to_string(), highlight()),
+                (true, false) => Span::styled(choice.to_string(), picked_style()),
+                (false, _) => Span::from(choice.to_string()),
+            });
+            spans.push(Span::from("  "));
+        }
+        spans.push(Span::from(summary.to_string()).dark_gray());
+        Line::from(spans)
+    };
+    let lines = vec![
+        line(
+            OptionRow::Keep,
+            "Action",
+            Keep::CHOICES
+                .iter()
+                .map(|&k| (k.label(), k == keep))
+                .collect(),
+            keep.summary(),
+        ),
+        line(
+            OptionRow::Backend,
+            "Model",
+            Backend::CHOICES
+                .iter()
+                .map(|&b| (b.label(), b == backend))
+                .collect(),
+            backend.summary(),
+        ),
+    ];
+    frame.render_widget(Paragraph::new(lines).block(panel("Options")), area);
+}
+
+fn draw_files(
+    frame: &mut Frame,
+    area: Rect,
+    focus: Focus,
+    files: &[PathBuf],
+    checked: &BTreeSet<usize>,
+    state: &mut ListState,
+) {
+    let title = if checked.is_empty() {
+        "Pick files".to_string()
+    } else {
+        format!("Pick files ({} selected)", checked.len())
+    };
+    let block = panel(&title);
     if files.is_empty() {
         let text = format!("No video files here ({}).", VIDEO_EXTENSIONS.join(", "));
         let paragraph = Paragraph::new(text).wrap(Wrap { trim: true });
         frame.render_widget(paragraph.dark_gray().block(block), area);
         return;
     }
-    let list = List::new(files.iter().map(|f| File(f).display()))
-        .block(block)
-        .highlight_style(highlight())
-        .highlight_symbol("› ");
+    let rows = files.iter().enumerate().map(|(i, file)| {
+        let mark = if checked.contains(&i) { "[x] " } else { "[ ] " };
+        Line::from(vec![Span::from(mark), File(file).display()])
+    });
+    let list = List::new(rows).block(block);
+    let list = match focus {
+        Focus::Files => list.highlight_style(highlight()).highlight_symbol("› "),
+        Focus::Tools | Focus::Options => list.highlight_symbol("  "),
+    };
     frame.render_stateful_widget(list, area, state);
-}
-
-fn draw_tools(frame: &mut Frame, area: Rect, state: &mut ListState) {
-    let block = panel("Pick a tool");
-    if Tool::ALL.is_empty() {
-        frame.render_widget(
-            Paragraph::new("No tools yet.").dark_gray().block(block),
-            area,
-        );
-        return;
-    }
-    let rows = Tool::ALL.map(|t| (t.name(), t.summary()));
-    draw_choices(frame, area, block, &rows, state);
 }
 
 /// Lists names with their summaries in an aligned column.
@@ -785,6 +1091,7 @@ fn draw_choices(
     block: Block<'static>,
     rows: &[(&str, &str)],
     state: &mut ListState,
+    selected: Style,
 ) {
     // Two spaces between the longest name and its summary.
     let width = rows.iter().map(|(name, _)| name.len()).max().unwrap_or(0) + 2;
@@ -796,47 +1103,91 @@ fn draw_choices(
     });
     let list = List::new(items)
         .block(block)
-        .highlight_style(highlight())
+        .highlight_style(selected)
         .highlight_symbol("› ");
     frame.render_stateful_widget(list, area, state);
 }
 
+/// Draws a status line, then each file with its progress or output.
 fn draw_running(
     frame: &mut Frame,
     area: Rect,
     title: &str,
-    file: &Path,
-    progress: Option<Progress>,
+    files: &[FileRun],
     cancelling: bool,
+    scroll: &mut Scroll,
 ) {
     let block = panel(title);
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
-    let [text, _, status_area] = Layout::vertical([
+    let [status_area, _, lines_area] = Layout::vertical([
         Constraint::Length(1),
         Constraint::Length(1),
-        Constraint::Length(1),
+        Constraint::Fill(1),
     ])
     .areas(inner);
     let verb = if cancelling { "Cancelling" } else { "Running" };
-    let status = Line::from(vec![
-        Span::from(format!("{verb} {title} on ")),
-        File(file).display(),
-        Span::from("…"),
-    ]);
-    frame.render_widget(status, text);
+    let done = files.iter().filter(|f| f.is_finished()).count();
+    let status = format!("{verb} {title}… {done} of {} done", files.len());
+    frame.render_widget(Line::from(status), status_area);
 
+    // Half the width at most, so a long name leaves room for its progress.
+    let name_width = files
+        .iter()
+        .map(|run| File(&run.file).display().width() + 2)
+        .max()
+        .unwrap_or(0)
+        .min(usize::from(lines_area.width) / 2);
+    let (lines, running) = result_lines(files, name_width);
+    let text_area = draw_lines(frame, lines_area, &lines, scroll);
+
+    // Each running file's progress goes beside its name, on whichever row that line lands.
+    let gap = u16::try_from(name_width + 1).unwrap_or(u16::MAX);
+    let mut row: usize = 0;
+    let mut running = running.into_iter().peekable();
+    for (i, line) in lines.iter().enumerate() {
+        if let Some((_, progress)) = running.next_if(|&(line, _)| line == i)
+            && let Some(y) = row.checked_sub(scroll.offset)
+            && let Ok(y) = u16::try_from(y)
+            && y < text_area.height
+        {
+            let area = Rect {
+                x: text_area.x + gap,
+                y: text_area.y + y,
+                width: text_area.width.saturating_sub(gap),
+                height: 1,
+            };
+            draw_progress(frame, area, progress.borrow().clone());
+        }
+        row += Paragraph::new(line.clone())
+            .wrap(Wrap { trim: false })
+            .line_count(text_area.width);
+    }
+}
+
+fn state_mark(state: &FileState) -> Span<'static> {
+    match state {
+        FileState::Waiting => Span::from("· ").dark_gray(),
+        FileState::Running(_) => Span::from("› ").cyan(),
+        FileState::Finished(Finished::Output(_)) => Span::from("✓ ").green(),
+        FileState::Finished(Finished::Failed(_)) => Span::from("✗ ").red(),
+        FileState::Finished(Finished::Exists(_)) => Span::from("! ").yellow(),
+        FileState::Finished(Finished::Skipped) => Span::from("- ").dark_gray(),
+    }
+}
+
+fn draw_progress(frame: &mut Frame, area: Rect, progress: Option<Progress>) {
     match progress {
         None => {}
-        Some(Progress::Scan(progress)) => draw_scan_progress(frame, status_area, progress),
+        Some(Progress::Scan(progress)) => draw_scan_progress(frame, area, progress),
         Some(Progress::Transcription(progress)) => match progress.ratio() {
-            Some(ratio) => frame.render_widget(gauge(ratio, progress.to_string()), status_area),
-            None => frame.render_widget(Line::from(progress.to_string()), status_area),
+            Some(ratio) => frame.render_widget(gauge(ratio, progress.to_string()), area),
+            None => frame.render_widget(Line::from(progress.to_string()), area),
         },
         Some(Progress::Separation(progress)) => match progress.ratio() {
-            Some(ratio) => frame.render_widget(gauge(ratio, progress.to_string()), status_area),
-            None => frame.render_widget(Line::from(progress.to_string()), status_area),
+            Some(ratio) => frame.render_widget(gauge(ratio, progress.to_string()), area),
+            None => frame.render_widget(Line::from(progress.to_string()), area),
         },
     }
 }
@@ -871,39 +1222,48 @@ fn draw_output(
     area: Rect,
     title: &str,
     lines: &[Line<'static>],
-    scroll: &mut usize,
-    viewport: &mut usize,
+    scroll: &mut Scroll,
 ) {
     // No side borders, so selecting text in the terminal copies clean lines.
     let block = panel(title);
     let inner = block.inner(area);
     frame.render_widget(block, area);
+    draw_lines(frame, inner, lines, scroll);
+}
 
+/// Draws `lines` wrapped and scrolled, with a scrollbar when they overflow, and returns the area
+/// the text takes.
+fn draw_lines(frame: &mut Frame, area: Rect, lines: &[Line<'static>], scroll: &mut Scroll) -> Rect {
     // A fixed scrollbar column keeps the wrap width, and so the row count, independent of
     // whether the scrollbar shows.
-    let [text_area, scrollbar_area] =
-        Layout::horizontal([Constraint::Fill(1), Constraint::Length(1)]).areas(inner);
+    let [text_area, _, scrollbar_area] = Layout::horizontal([
+        Constraint::Fill(1),
+        Constraint::Length(1),
+        Constraint::Length(1),
+    ])
+    .areas(area);
     let paragraph = Paragraph::new(lines.to_vec()).wrap(Wrap { trim: false });
 
     // Clamped here, where the viewport size is known, so key handlers can overshoot freely.
-    *viewport = usize::from(text_area.height);
+    scroll.viewport = usize::from(text_area.height);
     let max_scroll = paragraph
         .line_count(text_area.width)
-        .saturating_sub(*viewport);
-    *scroll = (*scroll).min(max_scroll);
+        .saturating_sub(scroll.viewport);
+    scroll.offset = scroll.offset.min(max_scroll);
 
-    let offset = u16::try_from(*scroll).unwrap_or(u16::MAX);
+    let offset = u16::try_from(scroll.offset).unwrap_or(u16::MAX);
     frame.render_widget(paragraph.scroll((offset, 0)), text_area);
 
     if max_scroll > 0 {
         // One position per possible scroll offset, so the thumb reaches the end at max_scroll.
-        let mut state = ScrollbarState::new(max_scroll + 1).position(*scroll);
+        let mut state = ScrollbarState::new(max_scroll + 1).position(scroll.offset);
         frame.render_stateful_widget(
             Scrollbar::new(ScrollbarOrientation::VerticalRight),
             scrollbar_area,
             &mut state,
         );
     }
+    text_area
 }
 
 /// A file the TUI names, which it shows in bold wherever it appears.
@@ -947,19 +1307,29 @@ fn is_video(path: &Path) -> bool {
 mod tests {
     use super::*;
 
-    fn running(job: Job, run: RunId, cancel: CancellationToken) -> App {
+    fn running_on(files: &[&str], job: Job, run: RunId, cancel: CancellationToken) -> App {
         let (results_tx, _) = mpsc::unbounded_channel();
         let mut app = App::new(PathBuf::from("/videos"), vec![], results_tx);
-        let (_, progress) = watch::channel(None);
         app.screen = Screen::Running {
-            file: "/videos/stream.mkv".into(),
+            files: files
+                .iter()
+                .map(|&file| FileRun::waiting(file.into()))
+                .collect(),
             job,
             run,
             cancel,
             cancelling: false,
-            progress,
+            scroll: Scroll::default(),
         };
         app
+    }
+
+    fn running(job: Job, run: RunId, cancel: CancellationToken) -> App {
+        running_on(&["/videos/stream.mkv"], job, run, cancel)
+    }
+
+    fn finish(app: &mut App, run: RunId, index: usize, finished: Finished) -> ControlFlow<()> {
+        app.on_event(run, index, FileEvent::Finished(finished))
     }
 
     fn key(code: KeyCode, modifiers: KeyModifiers) -> KeyEvent {
@@ -974,9 +1344,91 @@ mod tests {
     fn ignores_results_from_other_runs() {
         let mut app = running(Job::SyncCheck, RunId(1), CancellationToken::new());
 
-        let _ = app.on_result(RunId(0), output("stale"));
+        let _ = finish(&mut app, RunId(0), 0, output("stale"));
 
         assert!(matches!(app.screen, Screen::Running { run: RunId(1), .. }));
+    }
+
+    #[test]
+    fn keeps_running_until_every_file_has_finished() {
+        let mut app = running_on(
+            &["/videos/a.mkv", "/videos/b.mkv"],
+            Job::SyncCheck,
+            RunId(0),
+            CancellationToken::new(),
+        );
+
+        let _ = finish(&mut app, RunId(0), 1, output("b"));
+        assert!(matches!(app.screen, Screen::Running { .. }));
+
+        let _ = finish(&mut app, RunId(0), 0, output("a"));
+        let Screen::Output { lines, .. } = &app.screen else {
+            panic!("expected the output");
+        };
+        assert_eq!(
+            lines.iter().map(ToString::to_string).collect::<Vec<_>>(),
+            ["✓ a.mkv", "a", "", "✓ b.mkv", "b"]
+        );
+    }
+
+    #[test]
+    fn shows_a_lone_file_without_its_name() {
+        let mut app = running(Job::SyncCheck, RunId(0), CancellationToken::new());
+
+        let _ = finish(&mut app, RunId(0), 0, output("clean"));
+
+        let Screen::Output { lines, .. } = &app.screen else {
+            panic!("expected the output");
+        };
+        assert_eq!(
+            lines.iter().map(ToString::to_string).collect::<Vec<_>>(),
+            ["clean"]
+        );
+    }
+
+    #[test]
+    fn shows_what_finished_before_a_cancel() {
+        let mut app = running_on(
+            &["/videos/a.mkv", "/videos/b.mkv"],
+            Job::Transcribe,
+            RunId(0),
+            CancellationToken::new(),
+        );
+        let _ = finish(&mut app, RunId(0), 0, output("done"));
+        let _ = app.on_key(key(KeyCode::Esc, KeyModifiers::NONE));
+
+        let _ = finish(&mut app, RunId(0), 1, Finished::Skipped);
+
+        let Screen::Output { lines, .. } = &app.screen else {
+            panic!("expected the output");
+        };
+        assert_eq!(
+            lines.iter().map(ToString::to_string).collect::<Vec<_>>(),
+            ["✓ a.mkv", "done", "", "- b.mkv", "Skipped."]
+        );
+    }
+
+    #[tokio::test]
+    async fn skips_files_not_yet_started_once_cancelled() {
+        let (results_tx, mut results_rx) = mpsc::unbounded_channel();
+        let cancel = CancellationToken::new();
+        cancel.cancel();
+
+        spawn_job(
+            Job::Chapters,
+            vec![(0, "/videos/a.mkv".into()), (1, "/videos/b.mkv".into())],
+            false,
+            RunId(0),
+            cancel,
+            results_tx,
+        );
+
+        let mut skipped = vec![];
+        while let Some((_, index, event)) = results_rx.recv().await {
+            assert!(matches!(event, FileEvent::Finished(Finished::Skipped)));
+            skipped.push(index);
+        }
+        assert_eq!(skipped, [0, 1]);
     }
 
     #[test]
@@ -998,20 +1450,19 @@ mod tests {
     }
 
     #[test]
-    fn returns_to_the_tool_once_a_cancelled_run_finishes() {
+    fn returns_to_the_picker_once_a_cancelled_run_finishes() {
         let mut app = running(Job::Transcribe, RunId(0), CancellationToken::new());
         let _ = app.on_key(key(KeyCode::Esc, KeyModifiers::NONE));
 
-        let flow = app.on_result(RunId(0), output("Error: cancelled"));
+        let flow = finish(&mut app, RunId(0), 0, Finished::Skipped);
 
         assert!(flow.is_continue());
-        let Screen::PickTool { list, .. } = &app.screen else {
-            panic!("expected the tool picker");
-        };
-        assert_eq!(
-            list.selected().map(|i| Tool::ALL[i]),
-            Some(Tool::Transcribe)
-        );
+        assert!(matches!(
+            app.screen,
+            Screen::Pick {
+                focus: Focus::Files
+            }
+        ));
     }
 
     #[test]
@@ -1020,16 +1471,21 @@ mod tests {
         let mut app = running(Job::Transcribe, RunId(0), cancel.clone());
 
         let on_key = app.on_key(key(KeyCode::Char('c'), KeyModifiers::CONTROL));
-        let on_result = app.on_result(RunId(0), output("Error: cancelled"));
+        let on_event = finish(&mut app, RunId(0), 0, Finished::Skipped);
 
         assert_eq!(
-            (on_key, cancel.is_cancelled(), on_result),
+            (on_key, cancel.is_cancelled(), on_event),
             (ControlFlow::Continue(()), true, ControlFlow::Break(()))
         );
     }
 
     fn confirming(app: &mut App) {
-        let _ = app.on_result(RunId(0), Finished::Exists("/videos/stream.srt".into()));
+        let _ = finish(
+            app,
+            RunId(0),
+            0,
+            Finished::Exists("/videos/stream.srt".into()),
+        );
     }
 
     #[test]
@@ -1038,12 +1494,61 @@ mod tests {
 
         confirming(&mut app);
 
-        let Screen::ConfirmOverwrite { job, output, .. } = &app.screen else {
+        let Screen::ConfirmOverwrite { job, files } = &app.screen else {
             panic!("expected the overwrite confirmation");
         };
         assert_eq!(
-            (*job, output.as_path()),
-            (Job::Transcribe, Path::new("/videos/stream.srt"))
+            (*job, files[0].existing_output()),
+            (Job::Transcribe, Some(Path::new("/videos/stream.srt")))
+        );
+    }
+
+    /// A finished `a.mkv`, and a `b.mkv` that stopped before replacing `b.srt`.
+    fn confirming_one_of_two() -> App {
+        let mut app = running_on(
+            &["/videos/a.mkv", "/videos/b.mkv"],
+            Job::Transcribe,
+            RunId(0),
+            CancellationToken::new(),
+        );
+        let _ = finish(&mut app, RunId(0), 0, output("kept"));
+        let _ = finish(
+            &mut app,
+            RunId(0),
+            1,
+            Finished::Exists("/videos/b.srt".into()),
+        );
+        app
+    }
+
+    #[tokio::test]
+    async fn overwriting_reruns_only_the_stopped_files() {
+        let mut app = confirming_one_of_two();
+
+        let _ = app.on_key(key(KeyCode::Char('y'), KeyModifiers::NONE));
+
+        let Screen::Running { files, .. } = &app.screen else {
+            panic!("expected the rerun");
+        };
+        assert!(matches!(
+            files[0].state,
+            FileState::Finished(Finished::Output(_))
+        ));
+        assert!(matches!(files[1].state, FileState::Waiting));
+    }
+
+    #[test]
+    fn declining_to_overwrite_keeps_the_other_results() {
+        let mut app = confirming_one_of_two();
+
+        let _ = app.on_key(key(KeyCode::Char('n'), KeyModifiers::NONE));
+
+        let Screen::Output { lines, .. } = &app.screen else {
+            panic!("expected the output");
+        };
+        assert_eq!(
+            lines.iter().map(ToString::to_string).collect::<Vec<_>>(),
+            ["✓ a.mkv", "kept", "", "- b.mkv", "Skipped."]
         );
     }
 
@@ -1064,20 +1569,147 @@ mod tests {
     }
 
     #[test]
-    fn returns_to_the_tool_when_overwriting_is_declined() {
+    fn returns_to_the_picker_when_overwriting_is_declined() {
         let mut app = running(Job::Transcribe, RunId(0), CancellationToken::new());
         confirming(&mut app);
 
         let _ = app.on_key(key(KeyCode::Char('n'), KeyModifiers::NONE));
 
-        assert!(matches!(app.screen, Screen::PickTool { .. }));
+        assert!(matches!(app.screen, Screen::Pick { .. }));
     }
 
     fn idle(screen: Screen) -> App {
         let (results_tx, _) = mpsc::unbounded_channel();
-        let mut app = App::new(PathBuf::from("/videos"), vec![], results_tx);
+        let files = vec![
+            "/videos/a.mkv".into(),
+            "/videos/b.mkv".into(),
+            "/videos/c.mkv".into(),
+        ];
+        let mut app = App::new(PathBuf::from("/videos"), files, results_tx);
         app.screen = screen;
         app
+    }
+
+    fn picking_files() -> App {
+        idle(Screen::Pick {
+            focus: Focus::Files,
+        })
+    }
+
+    fn running_files(app: &App) -> Vec<PathBuf> {
+        let Screen::Running { files, .. } = &app.screen else {
+            panic!("expected a run");
+        };
+        files.iter().map(|f| f.file.clone()).collect()
+    }
+
+    #[test]
+    fn starts_on_the_tools_and_moves_to_the_files_on_enter() {
+        let mut app = idle(Screen::Pick {
+            focus: Focus::Tools,
+        });
+
+        press(&mut app, &[KeyCode::Down, KeyCode::Enter]);
+
+        assert!(matches!(
+            app.screen,
+            Screen::Pick {
+                focus: Focus::Files
+            }
+        ));
+        assert_eq!(app.tool_list.selected(), Some(1));
+    }
+
+    #[tokio::test]
+    async fn runs_the_checked_files() {
+        let mut app = picking_files();
+
+        press(
+            &mut app,
+            &[
+                KeyCode::Char(' '),
+                KeyCode::Down,
+                KeyCode::Down,
+                KeyCode::Char(' '),
+                KeyCode::Enter,
+            ],
+        );
+
+        assert_eq!(
+            running_files(&app),
+            [PathBuf::from("/videos/a.mkv"), "/videos/c.mkv".into()]
+        );
+    }
+
+    #[tokio::test]
+    async fn runs_the_highlighted_file_when_none_are_checked() {
+        let mut app = picking_files();
+
+        press(&mut app, &[KeyCode::Down, KeyCode::Enter]);
+
+        assert_eq!(running_files(&app), [PathBuf::from("/videos/b.mkv")]);
+    }
+
+    #[test]
+    fn a_selects_all_then_clears() {
+        let mut app = picking_files();
+
+        press(&mut app, &[KeyCode::Char('a')]);
+        assert_eq!(app.checked, BTreeSet::from([0, 1, 2]));
+
+        press(&mut app, &[KeyCode::Char('a')]);
+        assert_eq!(app.checked, BTreeSet::new());
+    }
+
+    #[tokio::test]
+    async fn going_back_from_the_output_keeps_the_picks() {
+        let mut app = picking_files();
+        press(&mut app, &[KeyCode::Char(' '), KeyCode::Enter]);
+        let _ = finish(&mut app, RunId(0), 0, output("done"));
+
+        press(&mut app, &[KeyCode::Esc]);
+
+        assert!(matches!(
+            app.screen,
+            Screen::Pick {
+                focus: Focus::Files
+            }
+        ));
+        assert_eq!(app.checked, BTreeSet::from([0]));
+    }
+
+    #[test]
+    fn shows_each_file_as_it_finishes() {
+        let mut app = running_on(
+            &["/videos/a.mkv", "/videos/b.mkv", "/videos/c.mkv"],
+            Job::SyncCheck,
+            RunId(0),
+            CancellationToken::new(),
+        );
+        let (_, progress) = watch::channel(None);
+        let _ = app.on_event(RunId(0), 2, FileEvent::Started(progress));
+        let _ = finish(&mut app, RunId(0), 1, output("b"));
+
+        let Screen::Running { files, .. } = &app.screen else {
+            panic!("expected the run");
+        };
+        let (lines, running) = result_lines(files, 6);
+        assert_eq!(
+            (
+                lines.iter().map(ToString::to_string).collect::<Vec<_>>(),
+                running.iter().map(|&(line, _)| line).collect::<Vec<_>>()
+            ),
+            (
+                vec![
+                    "· a.mkv".to_string(),
+                    "✓ b.mkv".into(),
+                    "b".into(),
+                    "".into(),
+                    "› …mkv".into()
+                ],
+                vec![4]
+            )
+        );
     }
 
     fn press(app: &mut App, codes: &[KeyCode]) {
@@ -1086,57 +1718,79 @@ mod tests {
         }
     }
 
-    #[test]
-    fn asks_what_to_remove_then_the_model_offering_tiger_first() {
-        let mut app = idle(tool_picker(
-            "/videos/stream.mkv".into(),
-            Tool::DialogueSeparation,
-        ));
+    fn picking(tool: Tool, focus: Focus) -> App {
+        let mut app = idle(Screen::Pick { focus });
+        app.tool_list
+            .select(Tool::ALL.iter().position(|&t| t == tool));
+        app
+    }
 
-        press(&mut app, &[KeyCode::Enter, KeyCode::Down, KeyCode::Enter]);
-
-        let Screen::PickBackend { file, keep, list } = &app.screen else {
-            panic!("expected the model picker");
+    fn focus(app: &App) -> Focus {
+        let Screen::Pick { focus } = app.screen else {
+            panic!("expected the picker");
         };
-        let selected = list.selected().map(|i| Backend::CHOICES[i]);
-        assert_eq!(
-            (file.as_path(), *keep, selected),
-            (
-                Path::new("/videos/stream.mkv"),
-                Keep::Ambience,
-                Some(Backend::Tiger)
-            )
-        );
+        focus
     }
 
     #[test]
-    fn backs_out_of_the_model_picker_to_the_side_it_came_from() {
-        let mut app = idle(backend_picker("/videos/stream.mkv".into(), Keep::Ambience));
+    fn goes_from_a_tool_with_options_to_its_options_then_the_files() {
+        let mut app = picking(Tool::DialogueSeparation, Focus::Tools);
+
+        press(&mut app, &[KeyCode::Enter]);
+        assert_eq!(focus(&app), Focus::Options);
+
+        press(&mut app, &[KeyCode::Enter]);
+        assert_eq!(focus(&app), Focus::Files);
 
         press(&mut app, &[KeyCode::Esc]);
+        assert_eq!(focus(&app), Focus::Options);
 
-        let Screen::PickKeep { list, .. } = &app.screen else {
-            panic!("expected the side picker");
-        };
-        assert_eq!(
-            list.selected().map(|i| Keep::CHOICES[i]),
-            Some(Keep::Ambience)
-        );
+        press(&mut app, &[KeyCode::Esc]);
+        assert_eq!(focus(&app), Focus::Tools);
     }
 
     #[test]
-    fn backs_out_of_the_side_picker_to_dialogue_separation() {
-        let mut app = idle(keep_picker("/videos/stream.mkv".into(), None));
+    fn skips_the_options_for_a_tool_without_any() {
+        let mut app = picking(Tool::Transcribe, Focus::Tools);
+
+        press(&mut app, &[KeyCode::Enter]);
+        assert_eq!(focus(&app), Focus::Files);
 
         press(&mut app, &[KeyCode::Esc]);
+        assert_eq!(focus(&app), Focus::Tools);
+    }
 
-        let Screen::PickTool { list, .. } = &app.screen else {
-            panic!("expected the tool picker");
-        };
-        assert_eq!(
-            list.selected().map(|i| Tool::ALL[i]),
-            Some(Tool::DialogueSeparation)
+    #[tokio::test]
+    async fn runs_a_separation_with_the_chosen_options() {
+        let mut app = picking(Tool::DialogueSeparation, Focus::Options);
+
+        press(
+            &mut app,
+            &[
+                KeyCode::Right,
+                KeyCode::Down,
+                KeyCode::Right,
+                KeyCode::Enter,
+                KeyCode::Enter,
+            ],
         );
+
+        let Screen::Running { job, .. } = &app.screen else {
+            panic!("expected a run");
+        };
+        assert_eq!(*job, Job::Separate(Keep::Ambience, Backend::Sam));
+    }
+
+    #[test]
+    fn offers_tiger_first_and_wraps_around_the_choices() {
+        let mut app = picking(Tool::DialogueSeparation, Focus::Options);
+        assert_eq!(app.backend, Backend::Tiger);
+
+        press(&mut app, &[KeyCode::Down, KeyCode::Left]);
+        assert_eq!(app.backend, Backend::Sam);
+
+        press(&mut app, &[KeyCode::Right]);
+        assert_eq!(app.backend, Backend::Tiger);
     }
 
     #[test]

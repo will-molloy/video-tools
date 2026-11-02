@@ -24,7 +24,7 @@ use crate::{
         scratch::{self, Scratch},
     },
     srt::{self, Block},
-    tools::{self, sync_check::thousands},
+    tools::{self, Tool, cli::Printed, sync_check::thousands},
 };
 
 /// Whisper's rate, which `vt-ml transcribe` requires.
@@ -32,10 +32,11 @@ const SAMPLE_RATE: u32 = 16_000;
 
 #[derive(Debug, Args)]
 pub struct TranscribeArgs {
-    /// Video or audio file to transcribe
-    file: PathBuf,
+    /// Video or audio files to transcribe
+    #[arg(required = true)]
+    files: Vec<PathBuf>,
 
-    /// Replace an existing transcript, losing any edits to it
+    /// Replace existing transcripts, losing any edits to them
     #[arg(long)]
     force: bool,
 
@@ -86,14 +87,21 @@ impl Backend {
 
 pub async fn cli(args: &TranscribeArgs) -> Result<ExitCode> {
     let cancel = CancellationToken::new();
-    let run = async {
-        run(&args.file, args.backend, args.force, &cancel, |progress| {
-            ml::cli::show_progress(&progress);
-        })
-        .await
-        .map_err(tools::suggest_force)
-    };
-    ml::cli::run(&cancel, run, |outcome| outcome.lines()).await
+    tools::cli::run(Tool::Transcribe, &args.files, &cancel, |file| {
+        let cancel = &cancel;
+        async move {
+            let outcome = run(file, args.backend, args.force, cancel, |progress| {
+                tools::cli::show_progress(file, &progress);
+            })
+            .await
+            .map_err(tools::suggest_force)?;
+            Ok(Printed {
+                stdout: outcome.lines(),
+                ..Printed::default()
+            })
+        }
+    })
+    .await
 }
 
 #[derive(Debug, Clone, PartialEq)]

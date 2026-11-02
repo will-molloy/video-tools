@@ -47,3 +47,13 @@ fn audio_short_tail() {
 fn missing_file_exits_2() {
     assert_snapshot!(sync_check("missing.mp4"));
 }
+
+#[test]
+fn checks_the_other_files_when_one_is_missing() {
+    assert_snapshot!(common::vt(&[
+        "sync-check",
+        "clean-cfr.mp4",
+        "missing.mp4",
+        "clean-cfr.mkv"
+    ]));
+}

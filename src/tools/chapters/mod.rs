@@ -4,8 +4,13 @@ use std::{fmt, iter, path::Path, path::PathBuf, process::ExitCode};
 
 use anyhow::Result;
 use clap::Args;
+use tokio_util::sync::CancellationToken;
 
-use crate::{display, ffprobe};
+use crate::{
+    display,
+    ffprobe::{self, Cancelled},
+    tools::{self, Tool, cli::Printed},
+};
 
 /// YouTube ignores chapters shorter than this.
 const MIN_CHAPTER_SECS: u64 = 10;
@@ -15,30 +20,46 @@ const MIN_CHAPTERS: usize = 3;
 
 #[derive(Debug, Args)]
 pub struct ChaptersArgs {
-    /// Video file to read chapters from
-    file: PathBuf,
+    /// Video files to read chapters from
+    #[arg(required = true)]
+    files: Vec<PathBuf>,
 }
 
 pub async fn cli(args: &ChaptersArgs) -> Result<ExitCode> {
-    match run(&args.file).await? {
-        Outcome::NoChapters => {
-            eprintln!(
-                "{} has no chapters",
-                display::plain(&display::path(&args.file))
-            );
-            Ok(ExitCode::FAILURE)
+    let cancel = CancellationToken::new();
+    tools::cli::run(Tool::Chapters, &args.files, &cancel, |file| {
+        let cancel = &cancel;
+        async move {
+            // Dropping the unfinished future on cancel kills ffprobe through `kill_on_drop`.
+            let outcome = cancel
+                .run_until_cancelled(run(file))
+                .await
+                .ok_or(Cancelled)??;
+            Ok(printed(file, outcome))
         }
-        Outcome::Chapters(report) => {
-            // Chapters to stdout and warnings to stderr, so `vt chapters f.mkv | wl-copy` copies
-            // just the list.
-            for line in report.lines() {
-                println!("{line}");
-            }
-            for violation in &report.violations {
-                eprintln!("warning: {violation}");
-            }
-            Ok(ExitCode::SUCCESS)
-        }
+    })
+    .await
+}
+
+fn printed(file: &Path, outcome: Outcome) -> Printed {
+    match outcome {
+        Outcome::NoChapters => Printed {
+            stderr: vec![format!("{} has no chapters", display::path(file))],
+            flagged: true,
+            ..Printed::default()
+        },
+
+        // Chapters to stdout and warnings to stderr, so `vt chapters f.mkv | wl-copy` copies just
+        // the list.
+        Outcome::Chapters(report) => Printed {
+            stdout: report.lines().collect(),
+            stderr: report
+                .violations
+                .iter()
+                .map(|violation| format!("warning: {violation}"))
+                .collect(),
+            flagged: false,
+        },
     }
 }
 

@@ -1,5 +1,6 @@
 use std::{
     fmt,
+    num::NonZero,
     path::{Path, PathBuf},
 };
 
@@ -8,6 +9,7 @@ use anyhow::anyhow;
 use crate::display;
 
 pub mod chapters;
+pub mod cli;
 pub mod dialogue_separation;
 pub mod sync_check;
 pub mod transcribe;
@@ -41,7 +43,7 @@ pub fn suggest_force(e: anyhow::Error) -> anyhow::Error {
     }
 }
 
-/// Tools the TUI offers for a picked file. Each maps to a CLI subcommand, and `summary` is also
+/// Tools the TUI offers for the picked files. Each maps to a CLI subcommand, and `summary` is also
 /// its CLI help and its README description.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Tool {
@@ -74,6 +76,19 @@ impl Tool {
             Tool::SyncCheck => "Diagnose audio/video sync problems",
             Tool::Transcribe => "Extract dialogue to .srt file",
             Tool::DialogueSeparation => "Remove background noise or dialogue",
+        }
+    }
+
+    /// How many files the tool runs on at once.
+    pub fn max_parallel(self) -> usize {
+        match self {
+            // Each run is one ffprobe process, so the limit is the number of CPU threads.
+            Tool::Chapters | Tool::SyncCheck => {
+                std::thread::available_parallelism().map_or(1, NonZero::get)
+            }
+
+            // Each run needs the GPU to itself.
+            Tool::Transcribe | Tool::DialogueSeparation => 1,
         }
     }
 }

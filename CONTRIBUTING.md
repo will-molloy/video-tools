@@ -16,6 +16,8 @@ Guidelines for both humans and coding agents.
   - `Tool::name` and `Tool::summary` in `src/tools/mod.rs` hold them.
   - The TUI menu and the CLI help read them from there.
   - The README's tool list repeats them word for word.
+- Each tool runs on many files, up to `Tool::max_parallel` at once.
+  One file's failure doesn't stop the others.
 - Input files are read-only.
   A tool never writes to, renames, moves or deletes one, even when forced or on failure.
   It writes each result as a new file next to the input, such as `talk.srt` or `talk.voice.mp4` for `talk.mp4`.

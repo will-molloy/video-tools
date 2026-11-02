@@ -1,7 +1,6 @@
 //! Runs the Python ML subcommands in `ml/`, which `ml/README.md` documents.
 
 pub mod child;
-pub mod cli;
 pub mod protocol;
 pub mod scratch;
 
