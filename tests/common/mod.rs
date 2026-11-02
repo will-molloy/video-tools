@@ -6,6 +6,7 @@ use assert_cmd::cargo::cargo_bin_cmd;
 pub const FIXTURES: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures");
 
 /// Runs `vt` with `args` in the fixtures directory and renders its output.
+#[allow(dead_code)]
 pub fn vt(args: &[&str]) -> String {
     render(
         &cargo_bin_cmd!("vt")
