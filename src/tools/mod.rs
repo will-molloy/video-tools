@@ -1,5 +1,6 @@
 use std::{
     fmt,
+    num::NonZero,
     path::{Path, PathBuf},
 };
 
@@ -81,11 +82,10 @@ impl Tool {
     /// How many files the tool runs on at once.
     pub fn max_parallel(self) -> usize {
         match self {
-            // Reads metadata only.
-            Tool::Chapters => 8,
-
-            // Each run holds every packet in memory.
-            Tool::SyncCheck => 4,
+            // Each run is one ffprobe process, so the limit is the number of CPU threads.
+            Tool::Chapters | Tool::SyncCheck => {
+                std::thread::available_parallelism().map_or(1, NonZero::get)
+            }
 
             // Each run loads a model into VRAM.
             Tool::Transcribe | Tool::DialogueSeparation => 1,
