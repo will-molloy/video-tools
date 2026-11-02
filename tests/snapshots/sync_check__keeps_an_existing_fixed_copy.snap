@@ -1,0 +1,10 @@
+---
+source: tests/sync_check.rs
+expression: "vt_in(&dir, &[\"sync-check\", \"--fix\", \"audio-gap.mp4\"])"
+---
+exit: 2
+
+stdout:
+
+stderr:
+Error: "audio-gap.synced.mp4" already exists; pass --force to replace it

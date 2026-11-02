@@ -73,7 +73,7 @@ impl Tool {
     pub fn summary(self) -> &'static str {
         match self {
             Tool::Chapters => "YouTube description chapter list",
-            Tool::SyncCheck => "Diagnose audio/video sync problems",
+            Tool::SyncCheck => "Diagnose and fix audio/video sync problems",
             Tool::Transcribe => "Extract dialogue to .srt file",
             Tool::DialogueSeparation => "Remove background noise or dialogue",
         }

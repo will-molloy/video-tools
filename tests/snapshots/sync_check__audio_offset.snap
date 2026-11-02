@@ -10,4 +10,6 @@ Audio #1: aac, 48000 Hz, 470 packets, 0:00.478 to 0:10.505
 
 major: audio #1 starts 478.0 ms after video. Fix: pad the start of the audio with silence.
 
+Run `vt sync-check --fix "audio-offset.mp4"` to write a fixed copy.
+
 stderr:

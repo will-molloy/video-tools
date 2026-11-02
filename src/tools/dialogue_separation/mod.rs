@@ -31,7 +31,7 @@ use crate::{
     tools::{self, Tool, cli::Printed, sync_check::thousands, transcribe},
 };
 use cache::{Cache, Entry, Key, Pending};
-use media::{AudioStream, Encoding, Output};
+use media::{AudioStream, Output};
 use speech::Span;
 
 #[derive(Debug, Args)]
@@ -336,7 +336,7 @@ pub async fn run(
                 sample_rate,
                 start: audio.start.unwrap_or_default(),
             },
-            encoding: Encoding::for_stream(path, audio).await?,
+            encoding: ffmpeg::AudioEncoding::for_stream(path, audio).await?,
         }
     } else {
         Output::Wav {

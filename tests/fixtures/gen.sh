@@ -42,6 +42,10 @@ generate() {
     "${ff[@]}" -i clean-cfr.mp4 -c copy -fflags +bitexact \
         -bsf:a "setts=ts=TS+24000" audio-offset.mp4
 
+    # Starts the video 0.5 s after the audio.
+    "${ff[@]}" -itsoffset 0.5 -i clean-cfr.mp4 -i clean-cfr.mp4 -map 0:v -map 1:a -c copy \
+        -fflags +bitexact audio-early.mp4
+
     # Drops the audio packets between 4.0 and 4.5 s, leaving a hole in the timeline.
     "${ff[@]}" -i clean-cfr.mp4 -c copy -fflags +bitexact \
         -bsf:a "noise=drop=between(pts\,192000\,215999)" audio-gap.mp4
@@ -209,6 +213,10 @@ check() {
     file=audio-offset.mp4
     read -r start _ <<<"$(audio_vs_video_ms "$file")"
     expect_ms "$file" "audio start offset" "$start" 478 522
+
+    file=audio-early.mp4
+    read -r start _ <<<"$(audio_vs_video_ms "$file")"
+    expect_ms "$file" "audio start offset" "$start" -522 -478
 
     file=audio-gap.mp4
     read -r count total <<<"$(audio_gaps "$file")"

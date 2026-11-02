@@ -19,8 +19,7 @@ pub const DROP_FACTOR: Factor = Factor::new(3, 2);
 pub const GAP_FACTOR: Factor = Factor::new(3, 2);
 
 /// Timing errors shorter than this many video frames are ignored, because video can't place
-/// content more finely. Retiming to CFR moves each frame by its drift, so it is safe only while
-/// drift stays below this floor too.
+/// content more finely.
 pub const VIDEO_NOISE_FLOOR_FRAMES: i64 = 1;
 
 /// Audio timing errors shorter than this many audio packets are ignored too. Encoders frame
@@ -191,6 +190,10 @@ impl Nanos {
         Nanos(millis * 1_000_000)
     }
 
+    pub fn as_nanos(self) -> i64 {
+        self.0
+    }
+
     pub fn abs(self) -> Self {
         Nanos(self.0.abs())
     }
@@ -269,7 +272,8 @@ pub enum Severity {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Action {
     /// Rewrite video timestamps to exact frame multiples with the `setts` bitstream filter,
-    /// without re-encoding. Valid only for jitter, because it keeps every frame.
+    /// without re-encoding. Valid only for jitter under half a frame, because it keeps every
+    /// frame.
     RetimeToCfr,
     /// Re-encode video at a constant rate, duplicating or dropping frames to keep them in place.
     ReencodeCfr,
@@ -486,7 +490,9 @@ fn video_findings(video: &VideoTrack) -> Vec<Finding> {
     if irregular > 0 {
         let max_drift = to_nanos(max_drift);
         let (shortest, longest) = bounds.unwrap_or_default();
-        let retimable = drops == 0 && max_drift < video.frame() * VIDEO_NOISE_FLOOR_FRAMES;
+        // Retiming snaps each frame to its nearest slot, so two frames could share a slot once
+        // drift reaches half a frame.
+        let retimable = drops == 0 && max_drift * 2 < video.frame();
         findings.push(Finding::new(
             video.track.index,
             max_drift,
@@ -731,6 +737,30 @@ mod tests {
                     shortest: Nanos(15_666_667),
                     longest: Nanos(17_166_667),
                     max_drift: Nanos(500_000),
+                },
+            }]
+        );
+    }
+
+    #[test]
+    fn jitter_over_half_a_frame_does_not_retime() {
+        // Frame 2 sits 800 ticks late, over half a frame, so snapping each frame to its nearest
+        // slot could land two frames on the same one. The drift is imperceptible, so re-encoding
+        // isn't worth it either.
+        let pts = vec![0, 1900, 3800, 5260];
+
+        assert_eq!(
+            diagnose_streams(video(pts), vec![]),
+            vec![Finding {
+                stream: 0,
+                severity: Severity::Minor,
+                action: Action::None,
+                kind: FindingKind::VariableFrameRate {
+                    intervals: 3,
+                    irregular: 3,
+                    shortest: Nanos(16_222_222),
+                    longest: Nanos(21_111_111),
+                    max_drift: Nanos(8_888_889),
                 },
             }]
         );

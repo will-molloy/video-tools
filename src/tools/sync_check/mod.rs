@@ -1,18 +1,27 @@
-//! `vt sync-check`: diagnose audio/video sync problems and recommend a fix.
+//! `vt sync-check`: diagnose audio/video sync problems, and fix them on request.
 
 pub mod diagnose;
+mod fix;
 
-use std::{path::Path, path::PathBuf, process::ExitCode, time::Duration};
+use std::{
+    fmt,
+    path::{Path, PathBuf},
+    process::ExitCode,
+    time::Duration,
+};
 
 use anyhow::{Context, Result};
 use clap::Args;
 use tokio_util::sync::CancellationToken;
 
 use crate::{
-    ffprobe::{self, Ratio, StreamKind},
+    display,
+    ffmpeg::{self, AudioEncoding},
+    ffprobe::{self, Cancelled, Ratio, StreamKind},
     tools::{self, Tool, cli::Printed},
 };
 use diagnose::{AudioTrack, Finding, Nanos, Packet, Probe, Span, Track, VideoTrack};
+use fix::{AudioPlan, Fixes, Plan, VideoEncoder, VideoFix, VideoPlan};
 
 /// Estimates audio packets per second for the progress bar when the container doesn't count
 /// them. This is AAC's frame size.
@@ -26,25 +35,67 @@ pub struct SyncCheckArgs {
     /// Video files to check
     #[arg(required = true)]
     files: Vec<PathBuf>,
+
+    /// Fix the issues and write each file's fixed copy next to it, such as `talk.synced.mp4`
+    #[arg(long)]
+    fix: bool,
+
+    /// Replace existing fixed copies
+    #[arg(long, requires = "fix")]
+    force: bool,
 }
 
 /// Flags a file when it has findings.
 pub async fn cli(args: &SyncCheckArgs) -> Result<ExitCode> {
+    let mode = if args.fix {
+        Mode::Fix { force: args.force }
+    } else {
+        Mode::Check
+    };
     let cancel = CancellationToken::new();
     tools::cli::run(Tool::SyncCheck, &args.files, &cancel, |file| {
         let cancel = &cancel;
-        async move { Ok(printed(&run(file, cancel, |_| {}).await?)) }
+        async move {
+            let outcome = run(file, mode, cancel, |progress| {
+                if let Mode::Fix { .. } = mode {
+                    tools::cli::show_progress(file, &progress);
+                }
+            })
+            .await
+            .map_err(tools::suggest_force)?;
+            Ok(printed(file, &outcome))
+        }
     })
     .await
 }
 
-fn printed(report: &Report) -> Printed {
+fn printed(file: &Path, outcome: &Outcome) -> Printed {
+    let report = &outcome.report;
     let mut stdout: Vec<String> = report.header().into_iter().collect();
     stdout.push(String::new());
     if report.findings.is_empty() {
         stdout.push(NO_ISSUES.to_string());
     }
     stdout.extend(report.findings.iter().map(ToString::to_string));
+    match &outcome.fixed {
+        None if report.fixable() > 0 => {
+            stdout.push(String::new());
+            stdout.push(format!(
+                "Run `vt sync-check --fix {}` to write a fixed copy.",
+                display::path(file)
+            ));
+        }
+        Some(fixed) if !report.findings.is_empty() => {
+            stdout.push(String::new());
+            stdout.push(fixed.summary());
+            if let Fixed::Wrote { remaining, .. } = fixed
+                && !remaining.is_empty()
+            {
+                stdout.extend(remaining.iter().map(ToString::to_string));
+            }
+        }
+        None | Some(_) => {}
+    }
     Printed {
         stdout,
         stderr: vec![],
@@ -54,21 +105,250 @@ fn printed(report: &Report) -> Printed {
 
 pub const NO_ISSUES: &str = "No sync issues found.";
 
+/// Whether a run also fixes what it finds.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Progress {
+pub enum Mode {
+    Check,
+
+    /// Writes a fixed copy, replacing an existing one only if `force` is set.
+    Fix {
+        force: bool,
+    },
+}
+
+#[derive(Debug)]
+pub struct Outcome {
+    pub report: Report,
+
+    /// `None` when only checking.
+    pub fixed: Option<Fixed>,
+}
+
+#[derive(Debug)]
+pub enum Fixed {
+    /// No finding has an automatic fix.
+    Nothing,
+
+    Wrote {
+        output: PathBuf,
+
+        /// The findings the copy fixes.
+        fixed: usize,
+
+        /// The findings with an automatic fix that a re-check of the copy still found.
+        remaining: Vec<Finding>,
+    },
+}
+
+impl Fixed {
+    /// What the fix did, in one line. A re-check that still found issues lists them below it.
+    pub fn summary(&self) -> String {
+        match self {
+            Fixed::Nothing => "Nothing to fix automatically.".into(),
+            Fixed::Wrote {
+                output,
+                fixed,
+                remaining,
+            } => {
+                let output = display::name(output);
+                let issues = if *fixed == 1 { "issue" } else { "issues" };
+                if remaining.is_empty() {
+                    format!("Fixed {fixed} {issues} in {output}.")
+                } else {
+                    format!("Wrote {output}, but re-checking it still found:")
+                }
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Progress {
+    Scanning(Scan),
+
+    Writing {
+        written: Duration,
+
+        /// `None` when the duration is unknown.
+        total: Option<Duration>,
+    },
+
+    Rechecking(Scan),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Scan {
     pub packets: u64,
 
     /// Estimated from the duration and stream rates. `None` when the duration is unknown.
     pub expected: Option<u64>,
 }
 
-/// Scans every packet in `path` and diagnoses it.
+impl Progress {
+    /// The fraction done. Totals are estimates, so it holds below 100% until the run ends.
+    #[allow(clippy::cast_precision_loss)]
+    pub fn ratio(&self) -> Option<f64> {
+        let ratio = match *self {
+            Progress::Scanning(scan) | Progress::Rechecking(scan) => {
+                let expected = scan.expected.filter(|&n| n > 0)?;
+                scan.packets as f64 / expected as f64
+            }
+            Progress::Writing { written, total } => {
+                let total = total.filter(|t| !t.is_zero())?;
+                written.as_secs_f64() / total.as_secs_f64()
+            }
+        };
+        Some(ratio.clamp(0.0, 0.99))
+    }
+}
+
+impl fmt::Display for Progress {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let ratio = self.ratio();
+        let what = match *self {
+            Progress::Scanning(Scan { packets, expected }) => match expected {
+                Some(expected) if ratio.is_some() => {
+                    format!("{} of ~{} packets", thousands(packets), thousands(expected))
+                }
+                _ => format!("{} packets", thousands(packets)),
+            },
+            Progress::Writing { .. } => "writing the fixed copy".into(),
+            Progress::Rechecking(_) => "re-checking the fixed copy".into(),
+        };
+        match ratio {
+            Some(ratio) => write!(f, "{:.0}% · {what}", ratio * 100.0),
+            None => f.write_str(&what),
+        }
+    }
+}
+
+/// Scans every packet in `path` and diagnoses it. When fixing, also writes a fixed copy next to
+/// it and re-checks the copy.
 pub async fn run(
     path: &Path,
+    mode: Mode,
     cancel: &CancellationToken,
     mut on_progress: impl FnMut(Progress),
-) -> Result<Report> {
+) -> Result<Outcome> {
+    let output = match mode {
+        Mode::Check => None,
+        Mode::Fix { force } => {
+            let output = output_path(path);
+            tools::check_output(&output, force)?;
+            Some(output)
+        }
+    };
     let info = ffprobe::streams(path).await?;
+    let probe = scan(path, &info, cancel, |s| on_progress(Progress::Scanning(s))).await?;
+    let report = Report::new(&probe);
+    let fixed = match output {
+        None => None,
+        Some(output) => {
+            let fixes = Fixes::new(&report.findings);
+            Some(if fixes.is_empty() {
+                Fixed::Nothing
+            } else {
+                let fixed = fix::fixable(&report.findings).count();
+                let plan = plan(path, &info, &probe, &fixes).await?;
+                let total = info.duration;
+                let remaining =
+                    write(path, &plan, &output, total, cancel, &mut on_progress).await?;
+                Fixed::Wrote {
+                    output,
+                    fixed,
+                    remaining,
+                }
+            })
+        }
+    };
+    Ok(Outcome { report, fixed })
+}
+
+/// `talk.mp4` becomes `talk.synced.mp4`.
+pub fn output_path(input: &Path) -> PathBuf {
+    let stem = input.file_stem().unwrap_or_default().to_string_lossy();
+    let ext = input
+        .extension()
+        .map_or_else(|| "mkv".into(), |e| e.to_string_lossy());
+    input.with_file_name(format!("{stem}.synced.{ext}"))
+}
+
+/// Decides how to write each stream, before any slow work.
+async fn plan(path: &Path, info: &ffprobe::Streams, probe: &Probe, fixes: &Fixes) -> Result<Plan> {
+    let video = &probe.video;
+    let video_plan = match fixes.video {
+        None => VideoPlan::Copy,
+        Some(VideoFix::Retime) => VideoPlan::Retime {
+            time_base: video.track.time_base,
+            frame_rate: video.frame_rate,
+        },
+        Some(VideoFix::Reencode) => VideoPlan::Reencode {
+            encoder: VideoEncoder::for_codec(&video.track.codec)?,
+            frame_rate: video.frame_rate,
+        },
+    };
+    let mut audio_plans = Vec::new();
+    for (position, audio) in probe.audio.iter().enumerate() {
+        let index = audio.track.index;
+        if !fixes.audio.contains(&index) {
+            continue;
+        }
+        let stream = info
+            .streams
+            .iter()
+            .find(|s| s.index == index)
+            .with_context(|| format!("audio #{index} not found"))?;
+        // A resynced stream has packets, so it has a span. Without video, it keeps its start.
+        let video_start = video
+            .span()
+            .or_else(|| audio.span())
+            .map_or_else(Nanos::default, |span| span.start);
+        audio_plans.push(AudioPlan {
+            position,
+            sample_rate: audio.sample_rate,
+            video_start,
+            encoding: AudioEncoding::for_stream(path, stream).await?,
+        });
+    }
+    Ok(Plan {
+        video: video_plan,
+        audio: audio_plans,
+    })
+}
+
+/// Writes `output` as `plan` says, then re-checks it and returns the findings with an automatic
+/// fix that it still has. `total` is the input's duration.
+async fn write(
+    path: &Path,
+    plan: &Plan,
+    output: &Path,
+    total: Option<Duration>,
+    cancel: &CancellationToken,
+    on_progress: &mut impl FnMut(Progress),
+) -> Result<Vec<Finding>> {
+    let written = ffmpeg::write(plan.args(path), output, |written| {
+        on_progress(Progress::Writing { written, total });
+    });
+    cancel
+        .run_until_cancelled(written)
+        .await
+        .ok_or(Cancelled)??;
+
+    let info = ffprobe::streams(output).await?;
+    let probe = scan(output, &info, cancel, |s| {
+        on_progress(Progress::Rechecking(s))
+    })
+    .await?;
+    Ok(fix::fixable(&diagnose::diagnose(&probe)).cloned().collect())
+}
+
+/// Reads every packet of the first video stream and each audio stream in `path`.
+async fn scan(
+    path: &Path,
+    info: &ffprobe::Streams,
+    cancel: &CancellationToken,
+    mut on_progress: impl FnMut(Scan),
+) -> Result<Probe> {
     let video = info
         .streams
         .iter()
@@ -94,7 +374,7 @@ pub async fn run(
         };
         packets += 1;
         if packets.is_multiple_of(PROGRESS_EVERY) {
-            on_progress(Progress { packets, expected });
+            on_progress(Scan { packets, expected });
         }
         if !packet.discard {
             collected[i].push(Packet {
@@ -119,7 +399,7 @@ pub async fn run(
     let StreamKind::Video { frame_rate } = video.kind else {
         unreachable!("video was found by kind");
     };
-    let probe = Probe {
+    Ok(Probe {
         video: VideoTrack {
             track: video_track,
             frame_rate: frame_rate
@@ -133,8 +413,7 @@ pub async fn run(
                 AudioTrack { track, sample_rate }
             })
             .collect(),
-    };
-    Ok(Report::new(&probe))
+    })
 }
 
 /// Estimates a stream's packet count in a file lasting `duration`: exact when the container
@@ -209,6 +488,11 @@ impl Report {
                 .collect(),
             findings: diagnose::diagnose(probe),
         }
+    }
+
+    /// How many findings have an automatic fix.
+    pub fn fixable(&self) -> usize {
+        fix::fixable(&self.findings).count()
     }
 
     /// One line per stream.
