@@ -11,17 +11,24 @@ use std::{
 
 use anyhow::{Context, Result};
 
-use crate::display;
+use crate::{display, process};
 
 const PARTIAL: &str = ".partial-";
 
-/// `~/.cache/video-tools/<tool>`, or under `$XDG_CACHE_HOME`.
+/// `video-tools/<tool>` under `$XDG_CACHE_HOME` if set, otherwise under `%LOCALAPPDATA%` on
+/// Windows and `~/.cache` elsewhere.
 pub fn cache_dir(tool: &str) -> Result<PathBuf> {
-    let base = std::env::var_os("XDG_CACHE_HOME")
-        .filter(|dir| !dir.is_empty())
+    let env = |name| std::env::var_os(name).filter(|dir| !dir.is_empty());
+    let base = env("XDG_CACHE_HOME")
         .map(PathBuf::from)
-        .or_else(|| std::env::home_dir().map(|home| home.join(".cache")))
-        .context("no cache directory: neither XDG_CACHE_HOME nor HOME is set")?;
+        .or_else(|| {
+            if cfg!(windows) {
+                env("LOCALAPPDATA").map(PathBuf::from)
+            } else {
+                std::env::home_dir().map(|home| home.join(".cache"))
+            }
+        })
+        .context("no cache directory: set XDG_CACHE_HOME")?;
     Ok(base.join("video-tools").join(tool))
 }
 
@@ -80,8 +87,8 @@ fn sweep(root: &Path) {
         let Some((_, owner)) = name.to_str().and_then(|n| n.split_once(PARTIAL)) else {
             continue;
         };
-        let pid = owner.split('-').next().unwrap_or_default();
-        if !Path::new("/proc").join(pid).exists() {
+        let pid = owner.split('-').next().and_then(|pid| pid.parse().ok());
+        if !pid.is_some_and(process::alive) {
             let _ = fs::remove_dir_all(entry.path());
         }
     }
@@ -139,7 +146,7 @@ mod tests {
     #[test]
     fn sweeps_directories_of_dead_processes() {
         let root = tempfile::tempdir().unwrap();
-        // No process has this pid: Linux caps pids at 2^22.
+        // No process has this pid: Linux caps pids at 2^22, and Windows pids are multiples of 4.
         let dead = root.path().join("run.partial-99999999-0");
         fs::create_dir(&dead).unwrap();
 

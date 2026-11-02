@@ -4,7 +4,7 @@ pub mod child;
 pub mod protocol;
 pub mod scratch;
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use anyhow::{Result, bail};
 use tokio::process::Command;
@@ -47,12 +47,31 @@ enum Gpu {
 
 impl Gpu {
     /// `VT_GPU` if set, otherwise whichever GPU driver is loaded.
+    #[cfg(unix)]
     fn detect() -> Result<Gpu> {
+        use std::path::Path;
+
         Gpu::choose(
             std::env::var(GPU_ENV).ok().as_deref(),
             Path::new("/dev/kfd").exists(),
             Path::new("/proc/driver/nvidia/version").exists(),
         )
+    }
+
+    /// `VT_GPU` if set, otherwise NVIDIA if its driver is installed. PyTorch builds for ROCm
+    /// exist only for Linux.
+    #[cfg(windows)]
+    fn detect() -> Result<Gpu> {
+        let system = std::env::var_os("SystemRoot").map(PathBuf::from);
+        let gpu = Gpu::choose(
+            std::env::var(GPU_ENV).ok().as_deref(),
+            false,
+            system.is_some_and(|dir| dir.join("System32").join("nvcuda.dll").exists()),
+        )?;
+        if gpu == Gpu::Rocm {
+            bail!("ROCm needs Linux; set {GPU_ENV} to cuda");
+        }
+        Ok(gpu)
     }
 
     fn choose(requested: Option<&str>, amd: bool, nvidia: bool) -> Result<Gpu> {

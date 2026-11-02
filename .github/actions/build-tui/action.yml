@@ -19,11 +19,18 @@ runs:
       shell: bash
       run: cargo build --locked
 
-    - name: Install ffmpeg
+    - name: Install ffmpeg (Linux)
+      if: runner.os == 'Linux'
       shell: bash
       run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ffmpeg
 
+    - name: Install ffmpeg (Windows)
+      if: runner.os == 'Windows'
+      shell: bash
+      run: choco install ffmpeg -y --no-progress
+
     - name: Check fixtures
+      if: runner.os == 'Linux'
       shell: bash
       run: tests/fixtures/gen.sh --check
 
@@ -38,5 +45,6 @@ runs:
       uses: codecov/codecov-action@v7
       with:
         files: lcov.info
+        flags: ${{ runner.os }}
         fail_ci_if_error: true
         token: ${{ inputs.codecov-token }}

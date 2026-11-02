@@ -36,7 +36,7 @@ def separate_file(
     """Writes `voice.wav` and `ambience.wav` to `output_dir` and returns their paths.
 
     `spans` are the (start, end) seconds of speech. Removes both stems if anything goes wrong,
-    including SIGTERM, so a failed run leaves nothing behind. Progress counts one unit per channel
+    including a stop, so a failed run leaves nothing behind. Progress counts one unit per channel
     per chunk, over the chunks inside the spans.
     """
     voice_path = output_dir / VOICE

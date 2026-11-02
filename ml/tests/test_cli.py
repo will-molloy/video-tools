@@ -7,6 +7,10 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
+import child
+
 # Defines stub subcommands, then runs the entry point with them and the given arguments.
 SCRIPT = """
 import sys, time
@@ -35,7 +39,9 @@ class Sleep:
         open(args.partial, "w").close()
         try:
             progress(0, 1)
-            time.sleep(60)
+            # Short sleeps, since Windows only interrupts a sleep for SIGINT.
+            for _ in range(600):
+                time.sleep(0.1)
         finally:
             import os
             os.remove(args.partial)
@@ -49,7 +55,7 @@ def command(*args: str) -> list[str]:
 
 
 def run(*args: str):
-    result = subprocess.run(command(*args), capture_output=True, text=True, timeout=60)
+    result = child.run(command(*args))
     # Every stdout line must parse, or `vt` would reject the stream.
     messages = [json.loads(line) for line in result.stdout.splitlines()]
     return result.returncode, messages, result.stderr
@@ -118,26 +124,38 @@ def test_keeps_library_output_off_the_protocol_stream():
         "protocol.log('hello')\n"
     )
 
-    result = subprocess.run([sys.executable, "-c", script], capture_output=True, text=True)
+    result = subprocess.run([sys.executable, "-c", script], capture_output=True)
 
-    assert result.stdout == '{"type": "log", "message": "hello"}\n'
-    assert result.stderr == "from python\nfrom c\n"
+    assert result.stdout == b'{"type": "log", "message": "hello"}\n'
+    assert result.stderr.decode().splitlines() == ["from python", "from c"]
 
 
+def start_sleeping(partial: Path) -> subprocess.Popen[str]:
+    """Starts the `sleep` stub and waits until it's mid-run, with its partial output written."""
+    sleeping = child.spawn(command("sleep", "--partial", str(partial)))
+    assert json.loads(sleeping.stdout.readline())["type"] == "progress"
+    assert partial.exists()
+    return sleeping
+
+
+def test_stops_when_stdin_closes_and_lets_the_subcommand_clean_up(tmp_path: Path):
+    partial = tmp_path / "partial"
+    sleeping = start_sleeping(partial)
+
+    sleeping.stdin.close()
+
+    assert sleeping.wait(timeout=10) == 143
+    assert sleeping.stdout.read() == ""
+    assert not partial.exists()
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="Windows has no SIGTERM")
 def test_stops_on_sigterm_and_lets_the_subcommand_clean_up(tmp_path: Path):
     partial = tmp_path / "partial"
-    child = subprocess.Popen(
-        command("sleep", "--partial", str(partial)),
-        stdout=subprocess.PIPE,
-        stderr=subprocess.DEVNULL,
-        text=True,
-    )
+    sleeping = start_sleeping(partial)
 
-    # Wait until it's mid-run, with its partial output written.
-    assert json.loads(child.stdout.readline())["type"] == "progress"
-    assert partial.exists()
-    child.send_signal(signal.SIGTERM)
+    sleeping.send_signal(signal.SIGTERM)
 
-    assert child.wait(timeout=10) == 143
-    assert child.stdout.read() == ""
+    assert sleeping.wait(timeout=10) == 143
+    assert sleeping.stdout.read() == ""
     assert not partial.exists()
