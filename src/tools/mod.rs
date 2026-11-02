@@ -87,7 +87,7 @@ impl Tool {
                 std::thread::available_parallelism().map_or(1, NonZero::get)
             }
 
-            // Each run loads a model into VRAM.
+            // Each run needs the GPU to itself.
             Tool::Transcribe | Tool::DialogueSeparation => 1,
         }
     }
