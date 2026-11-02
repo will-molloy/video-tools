@@ -19,22 +19,9 @@ use std::{
 };
 
 use assert_cmd::cargo::cargo_bin;
+use common::hf_home;
 use insta::{Settings, assert_snapshot};
-use nix::{
-    sys::signal::{Signal, kill},
-    unistd::Pid,
-};
 use tempfile::TempDir;
-
-/// The user's Hugging Face home, which holds their login and downloaded models. Hugging Face
-/// otherwise looks under `XDG_CACHE_HOME`, which each test points at its own empty directory.
-fn hf_home() -> PathBuf {
-    let cache = std::env::var_os("XDG_CACHE_HOME").map_or_else(
-        || PathBuf::from(std::env::var_os("HOME").unwrap()).join(".cache"),
-        PathBuf::from,
-    );
-    std::env::var_os("HF_HOME").map_or_else(|| cache.join("huggingface"), PathBuf::from)
-}
 
 const FAKE_AMBIENCE_GAIN: f32 = 0.25;
 const FAKE_DELAY_ENV: &str = "VT_ML_FAKE_DELAY_S";
@@ -409,23 +396,11 @@ fn keeps_an_existing_output() {
     assert_eq!(workspace.cache_entries(), Vec::<String>::new());
 }
 
-/// PIDs of processes whose command line mentions `needle`.
-fn processes_mentioning(needle: &str) -> Vec<i32> {
-    fs::read_dir("/proc")
-        .unwrap()
-        .filter_map(|e| e.ok()?.file_name().to_str()?.parse::<i32>().ok())
-        .filter(|pid| {
-            fs::read(format!("/proc/{pid}/cmdline"))
-                .is_ok_and(|cmd| String::from_utf8_lossy(&cmd).contains(needle))
-        })
-        .collect()
-}
-
 #[test]
-fn cancels_on_sigint_and_cleans_up() {
+fn cancels_on_interrupt_and_cleans_up() {
     let workspace = Workspace::transcribed("clean-cfr.mp4");
-    let child = workspace
-        .command(&["clean-cfr.mp4", "--keep", "voice"])
+    let mut command = workspace.command(&["clean-cfr.mp4", "--keep", "voice"]);
+    let child = common::interruptible(&mut command)
         .env(FAKE_DELAY_ENV, "0.5")
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -447,19 +422,15 @@ fn cancels_on_sigint_and_cleans_up() {
         thread::sleep(Duration::from_millis(20));
     };
     // uv and Python, which both name the partial entry in their arguments.
-    assert!(!processes_mentioning(&partial).is_empty());
+    assert!(!common::processes_mentioning(&[&partial]).is_empty());
 
-    kill(
-        Pid::from_raw(child.id().try_into().unwrap()),
-        Signal::SIGINT,
-    )
-    .unwrap();
+    common::interrupt(&child);
     let output = child.wait_with_output().unwrap();
 
     assert_snapshot!(common::render(&output));
     assert_eq!(workspace.cache_entries(), Vec::<String>::new());
     assert_eq!(workspace.files(), ["clean-cfr.mp4", "clean-cfr.srt"]);
-    assert_eq!(processes_mentioning(&partial), Vec::<i32>::new());
+    assert_eq!(common::processes_mentioning(&[&partial]), Vec::<u32>::new());
 }
 
 #[test]

@@ -10,7 +10,6 @@ use std::{
 
 use anyhow::{Context, Result};
 use futures::{Stream, StreamExt, stream};
-use tokio::signal::unix::{SignalKind, signal};
 use tokio_util::sync::CancellationToken;
 
 use super::Tool;
@@ -18,9 +17,6 @@ use crate::{display, ffprobe::Cancelled};
 
 /// Exit code for errors, distinct from the 1 that tools use for "found a problem".
 pub const ERROR_EXIT: u8 = 2;
-
-const SIGINT: u8 = 2;
-const SIGTERM: u8 = 15;
 
 /// What a tool prints for one file.
 #[derive(Debug, Default)]
@@ -35,10 +31,10 @@ pub struct Printed {
 /// Runs `each` on `files`, up to the tool's parallel limit at once, and prints the results in
 /// input order. A file's error doesn't stop the others.
 ///
-/// Exits 128 plus the signal number when SIGINT or SIGTERM cancels the run, 2 if any file
-/// errored, 1 if any file was flagged, and 0 otherwise.
+/// Exits with [`Stop::exit_code`] when a [`Stop`] cancels the run, 2 if any file errored, 1 if
+/// any file was flagged, and 0 otherwise.
 ///
-/// A signal cancels `cancel`, and the run keeps going until it has cleaned up, so a subprocess
+/// A stop cancels `cancel`, and the run keeps going until it has cleaned up, so a subprocess
 /// never outlives `vt`. Files that haven't started are skipped.
 pub async fn run<'a, Fut>(
     tool: Tool,
@@ -49,8 +45,7 @@ pub async fn run<'a, Fut>(
 where
     Fut: Future<Output = Result<Printed>>,
 {
-    let mut interrupt = signal(SignalKind::interrupt()).context("failed to handle SIGINT")?;
-    let mut terminate = signal(SignalKind::terminate()).context("failed to handle SIGTERM")?;
+    let mut stops = Stops::new()?;
 
     let each = &each;
     let results = as_they_finish(files, tool.max_parallel(), |file| async move {
@@ -65,7 +60,7 @@ where
     let mut finished = BTreeMap::new();
     let mut next = 0;
     let mut output = Output::new(files.len() > 1);
-    let mut signalled = None;
+    let mut stopped = None;
     loop {
         tokio::select! {
             result = results.next() => {
@@ -77,24 +72,93 @@ where
                     next += 1;
                 }
             }
-            _ = interrupt.recv(), if signalled.is_none() => {
-                signalled = Some(SIGINT);
-                cancel.cancel();
-            }
-            _ = terminate.recv(), if signalled.is_none() => {
-                signalled = Some(SIGTERM);
+            stop = stops.recv(), if stopped.is_none() => {
+                stopped = Some(stop);
                 cancel.cancel();
             }
         }
     }
 
-    if let Some(signal) = signalled
+    if let Some(stop) = stopped
         && output.cancelled
     {
         eprintln!("Cancelled.");
-        return Ok(ExitCode::from(128 + signal));
+        return Ok(stop.exit_code());
     }
     Ok(output.exit_code())
+}
+
+/// A request from the terminal or the OS to stop the run.
+#[derive(Debug, Clone, Copy)]
+enum Stop {
+    /// SIGINT, or Ctrl-C or Ctrl-Break on Windows.
+    Interrupt,
+
+    /// SIGTERM, or the console closing on Windows.
+    Terminate,
+}
+
+impl Stop {
+    /// 128 plus the Unix signal number, as shells report it, on every platform.
+    fn exit_code(self) -> ExitCode {
+        ExitCode::from(match self {
+            Stop::Interrupt => 128 + 2,
+            Stop::Terminate => 128 + 15,
+        })
+    }
+}
+
+/// Listens for each [`Stop`].
+#[cfg(unix)]
+struct Stops {
+    interrupt: tokio::signal::unix::Signal,
+    terminate: tokio::signal::unix::Signal,
+}
+
+#[cfg(unix)]
+impl Stops {
+    fn new() -> Result<Stops> {
+        use tokio::signal::unix::{SignalKind, signal};
+        Ok(Stops {
+            interrupt: signal(SignalKind::interrupt()).context("failed to handle SIGINT")?,
+            terminate: signal(SignalKind::terminate()).context("failed to handle SIGTERM")?,
+        })
+    }
+
+    async fn recv(&mut self) -> Stop {
+        tokio::select! {
+            _ = self.interrupt.recv() => Stop::Interrupt,
+            _ = self.terminate.recv() => Stop::Terminate,
+        }
+    }
+}
+
+/// Listens for each [`Stop`].
+#[cfg(windows)]
+struct Stops {
+    ctrl_c: tokio::signal::windows::CtrlC,
+    ctrl_break: tokio::signal::windows::CtrlBreak,
+    ctrl_close: tokio::signal::windows::CtrlClose,
+}
+
+#[cfg(windows)]
+impl Stops {
+    fn new() -> Result<Stops> {
+        use tokio::signal::windows::{ctrl_break, ctrl_c, ctrl_close};
+        Ok(Stops {
+            ctrl_c: ctrl_c().context("failed to handle Ctrl-C")?,
+            ctrl_break: ctrl_break().context("failed to handle Ctrl-Break")?,
+            ctrl_close: ctrl_close().context("failed to handle the console closing")?,
+        })
+    }
+
+    async fn recv(&mut self) -> Stop {
+        tokio::select! {
+            _ = self.ctrl_c.recv() => Stop::Interrupt,
+            _ = self.ctrl_break.recv() => Stop::Interrupt,
+            _ = self.ctrl_close.recv() => Stop::Terminate,
+        }
+    }
 }
 
 /// Runs `each` on `files` and yields each result with its file's index as it finishes. The next

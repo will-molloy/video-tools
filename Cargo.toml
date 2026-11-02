@@ -28,4 +28,8 @@ windows = { version = "0.62.2", features = ["Win32_System_Threading"] }
 [dev-dependencies]
 assert_cmd = "2.2.2"
 insta = { version = "1.49.0", features = ["filters"] }
+sysinfo = { version = "0.40.1", default-features = false, features = ["system"] }
 tempfile = "3.27.0"
+
+[target.'cfg(windows)'.dev-dependencies]
+windows = { version = "0.62.2", features = ["Win32_System_Console"] }
