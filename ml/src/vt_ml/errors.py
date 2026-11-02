@@ -3,4 +3,5 @@ class UsageError(Exception):
 
 
 class Terminated(BaseException):
-    """Raised by the SIGTERM handler. A `BaseException`, so `except Exception` can't swallow it."""
+    """Raised when stdin closes or on SIGTERM. A `BaseException`, so `except Exception` can't
+    swallow it."""

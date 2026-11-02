@@ -64,7 +64,7 @@ def claim_stdout() -> Protocol:
     the stream. Duplicating the original stdout first keeps a private handle to it.
     """
     sys.stdout.flush()
-    out = os.fdopen(os.dup(sys.stdout.fileno()), "w", encoding="utf-8")
+    out = os.fdopen(os.dup(sys.stdout.fileno()), "w", encoding="utf-8", newline="\n")
     os.dup2(sys.stderr.fileno(), sys.stdout.fileno())
     # Python's stdout buffers separately, so writes through it would land out of order.
     sys.stdout = sys.stderr

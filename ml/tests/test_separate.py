@@ -2,13 +2,13 @@
 
 import json
 import os
-import signal
-import subprocess
 import sys
 from pathlib import Path
 
 import numpy as np
 import soundfile as sf
+
+import child
 
 from vt_ml.separate import chunking
 from vt_ml.separate.backends.fake import AMBIENCE_GAIN, DELAY_ENV
@@ -66,7 +66,7 @@ def command(
 
 
 def run(args: list[str]):
-    result = subprocess.run(args, capture_output=True, text=True, timeout=60)
+    result = child.run(args)
     return result.returncode, [json.loads(line) for line in result.stdout.splitlines()]
 
 
@@ -276,26 +276,20 @@ def test_rejects_the_wrong_sample_rate_and_leaves_no_outputs(tmp_path):
     assert list(out.iterdir()) == []
 
 
-def test_stops_on_sigterm_and_removes_partial_outputs(tmp_path):
+def test_stops_when_stdin_closes_and_removes_partial_outputs(tmp_path):
     source = write_wav(tmp_path / "in.wav", stereo(30))
     out = tmp_path / "out"
     out.mkdir()
-    child = subprocess.Popen(
-        command(source, out),
-        stdout=subprocess.PIPE,
-        stderr=subprocess.DEVNULL,
-        text=True,
-        env={**os.environ, DELAY_ENV: "0.2"},
-    )
+    separating = child.spawn(command(source, out), env={**os.environ, DELAY_ENV: "0.2"})
 
     # Wait until it's mid-run, with both stems open for writing.
-    for line in child.stdout:
+    for line in separating.stdout:
         if json.loads(line)["type"] == "progress":
             break
     assert sorted(p.name for p in out.iterdir()) == ["ambience.wav", "voice.wav"]
-    child.send_signal(signal.SIGTERM)
-    rest = [json.loads(line) for line in child.stdout]
+    separating.stdin.close()
+    rest = [json.loads(line) for line in separating.stdout]
 
-    assert child.wait(timeout=10) == 143
+    assert separating.wait(timeout=10) == 143
     assert all(m["type"] == "progress" for m in rest)
     assert list(out.iterdir()) == []

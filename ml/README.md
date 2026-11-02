@@ -45,16 +45,21 @@ Nothing else is written to stdout; library output is redirected to stderr.
 
 Human-readable logs and tracebacks. `vt` shows the last lines when a subcommand fails without an `error` message.
 
+### Stdin
+
+Closing stdin stops the subcommand, so `vt` keeps it open until it cancels.
+A SIGTERM stops it too, on Unix.
+
 ### Exit codes
 
-| Code | Meaning                                     |
-| ---- | ------------------------------------------- |
-| 0    | Success, after a `done` line                |
-| 2    | Error, after an `error` line                |
-| 143  | Stopped by SIGTERM, partial outputs removed |
+| Code | Meaning                               |
+| ---- | ------------------------------------- |
+| 0    | Success, after a `done` line          |
+| 2    | Error, after an `error` line          |
+| 143  | Stopped, with partial outputs removed |
 
-Subcommands check for SIGTERM between chunks, so stopping can take one chunk's inference.
-`vt` signals the whole process group and sends SIGKILL after 30 s.
+Subcommands check for a stop between chunks, so stopping can take one chunk's inference.
+`vt` kills the whole process tree 30 s after closing stdin.
 
 ## Subcommands
 
@@ -84,7 +89,7 @@ vt-ml separate --input IN.wav --output-dir DIR --speech SPEECH.json --backend sa
 - Inside a span the stems fade in and out over its first and last 0.25 s, using the chunking ramp, unless the span touches the start or end of the file
 - `DIR/voice.wav` and `DIR/ambience.wav` are always both written, since one pass produces both
 - Both are RF64 float32 with the input's rate, channel count and length
-- Both are removed on any failure, including SIGTERM
+- Both are removed on any failure, including a stop
 - `progress` counts one step per channel per chunk, over the chunks inside the spans
 - `done` adds `voice` and `ambience`, the paths written
 

@@ -1,10 +1,10 @@
 //! Caches separated stems, so separating a file again skips inference.
 //!
-//! Entries live in `~/.cache/video-tools/dialogue-separation/<key>/` (or under
-//! `$XDG_CACHE_HOME`). The key covers the backend, the speech spans, the file's size and mtime,
-//! and a hash of its first and last MiB. Hashing whole recordings would take minutes, and an
-//! edit that keeps the size and mtime and touches neither end is not a realistic way for a video
-//! to change. The spans put an edited transcript in a new entry.
+//! Entries live in `<key>/` under [`scratch::cache_dir`]. The key covers the backend, the speech
+//! spans, the file's size and mtime, and a hash of its first and last MiB. Hashing whole
+//! recordings would take minutes, and an edit that keeps the size and mtime and touches neither
+//! end is not a realistic way for a video to change. The spans put an edited transcript in a new
+//! entry.
 //!
 //! A run writes into a scratch directory and renames it into place when it finishes, so an entry
 //! is either complete or absent.

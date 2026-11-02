@@ -2,6 +2,7 @@ mod display;
 mod ffmpeg;
 mod ffprobe;
 mod ml;
+mod process;
 mod srt;
 mod tools;
 mod tui;

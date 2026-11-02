@@ -2,13 +2,13 @@
 
 import json
 import os
-import signal
-import subprocess
 import sys
 from pathlib import Path
 
 import numpy as np
 import soundfile as sf
+
+import child
 
 from vt_ml.transcribe.backends.fake import DELAY_ENV
 
@@ -46,7 +46,7 @@ def command(input_path: Path, *extra: str) -> list[str]:
 
 
 def run(args: list[str]):
-    result = subprocess.run(args, capture_output=True, text=True, timeout=60)
+    result = child.run(args)
     return result.returncode, [json.loads(line) for line in result.stdout.splitlines()]
 
 
@@ -125,21 +125,15 @@ def test_refuses_to_move_the_fake_backend_off_the_cpu(tmp_path):
     assert messages[-1] == {"type": "error", "message": "the fake backend runs on cpu, not cuda"}
 
 
-def test_stops_on_sigterm(tmp_path):
+def test_stops_when_stdin_closes(tmp_path):
     source = write_wav(tmp_path / "in.wav", bursts(30.0))
-    child = subprocess.Popen(
-        command(source),
-        stdout=subprocess.PIPE,
-        stderr=subprocess.DEVNULL,
-        text=True,
-        env={**os.environ, DELAY_ENV: "0.2"},
-    )
+    transcribing = child.spawn(command(source), env={**os.environ, DELAY_ENV: "0.2"})
 
-    for line in child.stdout:
+    for line in transcribing.stdout:
         if json.loads(line)["type"] == "progress":
             break
-    child.send_signal(signal.SIGTERM)
-    rest = [json.loads(line) for line in child.stdout]
+    transcribing.stdin.close()
+    rest = [json.loads(line) for line in transcribing.stdout]
 
-    assert child.wait(timeout=10) == 143
+    assert transcribing.wait(timeout=10) == 143
     assert all(m["type"] == "progress" for m in rest)
