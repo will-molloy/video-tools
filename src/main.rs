@@ -38,9 +38,6 @@ enum Command {
     DialogueSeparation(DialogueSeparationArgs),
 }
 
-/// Exit code for errors, distinct from the 1 that tools use for "found a problem".
-const ERROR_EXIT: u8 = 2;
-
 #[tokio::main]
 async fn main() -> ExitCode {
     let result = match Cli::parse().command {
@@ -52,6 +49,6 @@ async fn main() -> ExitCode {
     };
     result.unwrap_or_else(|e| {
         eprintln!("Error: {}", display::plain(&format!("{e:#}")));
-        ExitCode::from(ERROR_EXIT)
+        ExitCode::from(tools::cli::ERROR_EXIT)
     })
 }

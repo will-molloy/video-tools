@@ -8,7 +8,10 @@ use anyhow::{Context, Result};
 use clap::Args;
 use tokio_util::sync::CancellationToken;
 
-use crate::ffprobe::{self, Ratio, StreamKind};
+use crate::{
+    ffprobe::{self, Ratio, StreamKind},
+    tools::{self, Tool, cli::Printed},
+};
 use diagnose::{AudioTrack, Finding, Nanos, Packet, Probe, Span, Track, VideoTrack};
 
 /// Estimates audio packets per second for the progress bar when the container doesn't count
@@ -20,28 +23,33 @@ const PROGRESS_EVERY: u64 = 4096;
 
 #[derive(Debug, Args)]
 pub struct SyncCheckArgs {
-    /// Video file to check
-    file: PathBuf,
+    /// Video files to check
+    #[arg(required = true)]
+    files: Vec<PathBuf>,
 }
 
-/// Exits 0 when clean and 1 when there are findings. Errors exit 2 from `main`.
+/// Flags a file when it has findings.
 pub async fn cli(args: &SyncCheckArgs) -> Result<ExitCode> {
-    let report = run(&args.file, &CancellationToken::new(), |_| {}).await?;
-    for line in report.header() {
-        println!("{line}");
-    }
-    println!();
-    if report.findings.is_empty() {
-        println!("{NO_ISSUES}");
-    }
-    for finding in &report.findings {
-        println!("{finding}");
-    }
-    Ok(if report.findings.is_empty() {
-        ExitCode::SUCCESS
-    } else {
-        ExitCode::FAILURE
+    let cancel = CancellationToken::new();
+    tools::cli::run(Tool::SyncCheck, &args.files, &cancel, |file| {
+        let cancel = &cancel;
+        async move { Ok(printed(&run(file, cancel, |_| {}).await?)) }
     })
+    .await
+}
+
+fn printed(report: &Report) -> Printed {
+    let mut stdout: Vec<String> = report.header().into_iter().collect();
+    stdout.push(String::new());
+    if report.findings.is_empty() {
+        stdout.push(NO_ISSUES.to_string());
+    }
+    stdout.extend(report.findings.iter().map(ToString::to_string));
+    Printed {
+        stdout,
+        stderr: vec![],
+        flagged: !report.findings.is_empty(),
+    }
 }
 
 pub const NO_ISSUES: &str = "No sync issues found.";

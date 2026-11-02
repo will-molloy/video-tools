@@ -27,3 +27,21 @@ fn chapters_over_an_hour() {
 fn no_chapters() {
     assert_snapshot!(chapters("clean-cfr.mp4"));
 }
+
+#[test]
+fn heads_each_file_when_given_several() {
+    assert_snapshot!(common::vt(&[
+        "chapters",
+        "chapters-valid.mkv",
+        "chapters-hours.mkv"
+    ]));
+}
+
+#[test]
+fn flags_a_file_without_chapters_among_several() {
+    assert_snapshot!(common::vt(&[
+        "chapters",
+        "clean-cfr.mp4",
+        "chapters-valid.mkv"
+    ]));
+}

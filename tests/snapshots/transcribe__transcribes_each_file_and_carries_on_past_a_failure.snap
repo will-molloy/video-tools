@@ -1,0 +1,19 @@
+---
+source: tests/transcribe.rs
+expression: "workspace.vt(&[\"speech-bursts.mkv\", \"missing.mkv\", \"two.mkv\"])"
+---
+exit: 2
+
+stdout:
+==> "speech-bursts.mkv" <==
+Wrote 2 lines of speech to "speech-bursts.srt".
+Transcribed with the fake backend on cpu.
+Duration: [elapsed] s.
+
+==> "two.mkv" <==
+Wrote 2 lines of speech to "two.srt".
+Transcribed with the fake backend on cpu.
+Duration: [elapsed] s.
+
+stderr:
+Error: "missing.mkv": ffprobe failed: missing.mkv: No such file or directory

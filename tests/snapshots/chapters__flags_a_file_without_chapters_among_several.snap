@@ -1,0 +1,14 @@
+---
+source: tests/chapters.rs
+expression: "common::vt(&[\"chapters\", \"clean-cfr.mp4\", \"chapters-valid.mkv\"])"
+---
+exit: 1
+
+stdout:
+==> "chapters-valid.mkv" <==
+0:00 Intro
+0:15 Setup
+0:30 Chapter 3
+
+stderr:
+"clean-cfr.mp4" has no chapters

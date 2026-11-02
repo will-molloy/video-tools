@@ -1,0 +1,10 @@
+---
+source: tests/dialogue_separation.rs
+expression: "workspace.vt(&[\"clean-cfr.mp4\", \"other.mp4\", \"--keep\", \"voice\",\n\"--transcript\", \"clean-cfr.srt\"])"
+---
+exit: 2
+
+stdout:
+
+stderr:
+Error: --transcript takes one file, but got 2

@@ -189,6 +189,73 @@ fn processes_mentioning(needles: &[&str]) -> Vec<i32> {
         .collect()
 }
 
+/// Waits until `vt-ml` is mid-run, reading the audio in its scratch directory, and returns it.
+fn wait_for_scratch(workspace: &Workspace) -> String {
+    let deadline = Instant::now() + Duration::from_secs(60);
+    loop {
+        let scratch = workspace
+            .scratch()
+            .pop()
+            .map(|name| workspace.cache().join(name));
+        if let Some(scratch) = scratch
+            && !processes_mentioning(&["vt-ml", scratch.to_str().unwrap()]).is_empty()
+        {
+            return scratch.to_str().unwrap().to_string();
+        }
+        assert!(Instant::now() < deadline, "vt-ml never started");
+        thread::sleep(Duration::from_millis(20));
+    }
+}
+
+#[test]
+fn transcribes_each_file_and_carries_on_past_a_failure() {
+    let _masked = mask_elapsed();
+    let workspace = Workspace::with("speech-bursts.mkv");
+    fs::copy(
+        workspace.path("speech-bursts.mkv"),
+        workspace.path("two.mkv"),
+    )
+    .unwrap();
+
+    assert_snapshot!(workspace.vt(&["speech-bursts.mkv", "missing.mkv", "two.mkv"]));
+    assert_eq!(
+        (
+            fs::read_to_string(workspace.path("speech-bursts.srt")).unwrap(),
+            fs::read_to_string(workspace.path("two.srt")).unwrap()
+        ),
+        (BURSTS_SRT.to_string(), BURSTS_SRT.to_string())
+    );
+}
+
+#[test]
+fn sigint_skips_the_files_not_yet_started() {
+    let workspace = Workspace::with("speech-bursts.mkv");
+    fs::copy(
+        workspace.path("speech-bursts.mkv"),
+        workspace.path("two.mkv"),
+    )
+    .unwrap();
+    let child = workspace
+        .command("fake", &["speech-bursts.mkv", "two.mkv"])
+        .env(FAKE_DELAY_ENV, "0.5")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    wait_for_scratch(&workspace);
+
+    kill(
+        Pid::from_raw(child.id().try_into().unwrap()),
+        Signal::SIGINT,
+    )
+    .unwrap();
+    let output = child.wait_with_output().unwrap();
+
+    assert_snapshot!(common::render(&output));
+    assert_eq!(workspace.files(), ["speech-bursts.mkv", "two.mkv"]);
+    assert_eq!(workspace.scratch(), Vec::<String>::new());
+}
+
 #[test]
 fn cancels_on_sigint_and_cleans_up() {
     let workspace = Workspace::with("speech-bursts.mkv");
@@ -199,22 +266,7 @@ fn cancels_on_sigint_and_cleans_up() {
         .stderr(Stdio::piped())
         .spawn()
         .unwrap();
-
-    // Waits until `vt-ml` is mid-run, reading the audio in its scratch directory.
-    let deadline = Instant::now() + Duration::from_secs(60);
-    let scratch = loop {
-        let scratch = workspace
-            .scratch()
-            .pop()
-            .map(|name| workspace.cache().join(name));
-        if let Some(scratch) = scratch
-            && !processes_mentioning(&["vt-ml", scratch.to_str().unwrap()]).is_empty()
-        {
-            break scratch.to_str().unwrap().to_string();
-        }
-        assert!(Instant::now() < deadline, "vt-ml never started");
-        thread::sleep(Duration::from_millis(20));
-    };
+    let scratch = wait_for_scratch(&workspace);
 
     kill(
         Pid::from_raw(child.id().try_into().unwrap()),

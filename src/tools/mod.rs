@@ -8,6 +8,7 @@ use anyhow::anyhow;
 use crate::display;
 
 pub mod chapters;
+pub mod cli;
 pub mod dialogue_separation;
 pub mod sync_check;
 pub mod transcribe;
@@ -41,7 +42,7 @@ pub fn suggest_force(e: anyhow::Error) -> anyhow::Error {
     }
 }
 
-/// Tools the TUI offers for a picked file. Each maps to a CLI subcommand, and `summary` is also
+/// Tools the TUI offers for the picked files. Each maps to a CLI subcommand, and `summary` is also
 /// its CLI help and its README description.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Tool {
@@ -74,6 +75,20 @@ impl Tool {
             Tool::SyncCheck => "Diagnose audio/video sync problems",
             Tool::Transcribe => "Extract dialogue to .srt file",
             Tool::DialogueSeparation => "Remove background noise or dialogue",
+        }
+    }
+
+    /// How many files the tool runs on at once.
+    pub fn max_parallel(self) -> usize {
+        match self {
+            // Reads metadata only.
+            Tool::Chapters => 8,
+
+            // Each run holds every packet in memory.
+            Tool::SyncCheck => 4,
+
+            // Each run loads a model into VRAM.
+            Tool::Transcribe | Tool::DialogueSeparation => 1,
         }
     }
 }
