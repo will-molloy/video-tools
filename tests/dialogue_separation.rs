@@ -64,7 +64,9 @@ impl Workspace {
     }
 
     fn cache(&self) -> PathBuf {
-        self.path("cache").join("video-tools/dialogue-separation")
+        self.path("cache")
+            .join("video-tools")
+            .join("dialogue-separation")
     }
 
     fn command(&self, args: &[&str]) -> Command {
@@ -140,7 +142,8 @@ fn probe(path: &Path, stream: &str, entries: &str) -> String {
         .arg(path)
         .output()
         .unwrap();
-    String::from_utf8(output.stdout).unwrap().trim().to_string()
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    stdout.trim().lines().collect::<Vec<_>>().join("\n")
 }
 
 /// Decodes a file's first audio stream to interleaved float samples at 48 kHz, placed by their

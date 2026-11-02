@@ -47,7 +47,7 @@ impl Workspace {
     }
 
     fn cache(&self) -> PathBuf {
-        self.path("cache").join("video-tools/transcribe")
+        self.path("cache").join("video-tools").join("transcribe")
     }
 
     fn command(&self, backend: &str, args: &[&str]) -> Command {

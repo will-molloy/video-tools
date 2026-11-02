@@ -19,12 +19,12 @@ runs:
       shell: bash
       run: cargo build --locked
 
-    - name: Install ffmpeg
+    - name: Install ffmpeg (Linux)
       if: runner.os == 'Linux'
       shell: bash
       run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ffmpeg
 
-    - name: Install ffmpeg
+    - name: Install ffmpeg (Windows)
       if: runner.os == 'Windows'
       shell: bash
       run: choco install ffmpeg -y --no-progress
