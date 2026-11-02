@@ -14,8 +14,13 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  build:
-    runs-on: ubuntu-latest
+  check:
+    name: check (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ ubuntu-latest, windows-latest ]
+    runs-on: ${{ matrix.os }}
     permissions:
       contents: read
     steps:
@@ -24,6 +29,14 @@ jobs:
       - uses: ./.github/actions/build-tui
         with:
           codecov-token: ${{ secrets.CODECOV_TOKEN }}
+
+  build:
+    needs: [ check ]
+    if: always()
+    runs-on: ubuntu-slim
+    steps:
+      - name: Check every OS passed
+        run: test "${{ needs.check.result }}" = success
 
   release:
     needs: [ build ]
