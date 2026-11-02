@@ -1,0 +1,19 @@
+---
+source: tests/sync_check.rs
+expression: "fix(\"audio-early.mp4\")"
+---
+exit: 1
+
+stdout:
+Video #0: h264, 60 fps, 600 frames, 0:00.500 to 0:10.500
+Audio #1: aac, 48000 Hz, 469 packets, 0:00.000 to 0:10.005
+
+major: audio #1 starts 500.0 ms before video. Fix: trim the audio before the first video frame.
+
+Fixed 1 issue in "audio-early.synced.mp4".
+
+stderr:
+
+files:
+audio-early.mp4
+audio-early.synced.mp4

@@ -36,7 +36,7 @@ use crate::{
         self, Tool,
         chapters::{self, Outcome},
         dialogue_separation::{self, Backend, Keep},
-        sync_check::{self, Report, diagnose::Severity, thousands},
+        sync_check::{self, Fixed, Mode, diagnose::Severity},
         transcribe,
     },
 };
@@ -134,7 +134,7 @@ impl FileRun {
 /// The latest progress report from whichever tool is running.
 #[derive(Debug, Clone, PartialEq)]
 enum Progress {
-    Scan(sync_check::Progress),
+    Sync(sync_check::Progress),
     Transcription(transcribe::Progress),
     Separation(dialogue_separation::Progress),
 }
@@ -151,6 +151,7 @@ struct App {
     tool_list: ListState,
     file_list: ListState,
     checked: BTreeSet<usize>,
+    fix: bool,
     keep: Keep,
     backend: Backend,
     option: OptionRow,
@@ -177,8 +178,20 @@ enum Focus {
 /// A row of the options for the picked tool.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum OptionRow {
+    Fix,
     Keep,
     Backend,
+}
+
+impl OptionRow {
+    /// The rows of `tool`'s options, top to bottom.
+    fn of(tool: Tool) -> &'static [OptionRow] {
+        match tool {
+            Tool::SyncCheck => &[OptionRow::Fix],
+            Tool::DialogueSeparation => &[OptionRow::Keep, OptionRow::Backend],
+            Tool::Chapters | Tool::Transcribe => &[],
+        }
+    }
 }
 
 enum Screen {
@@ -242,6 +255,7 @@ impl App {
             tool_list: ListState::default().with_selected(first_index(&Tool::ALL)),
             file_list: ListState::default().with_selected(first_index(&files)),
             checked: BTreeSet::new(),
+            fix: false,
             keep: Keep::CHOICES[0],
             backend: Backend::CHOICES[0],
             option: OptionRow::Keep,
@@ -308,10 +322,15 @@ impl App {
                 }
                 navigate(&mut self.tool_list, key.code);
                 if matches!(key.code, KeyCode::Enter | KeyCode::Tab) {
-                    *focus = if has_options(&self.tool_list) {
-                        Focus::Options
-                    } else {
-                        Focus::Files
+                    let rows = option_rows(&self.tool_list);
+                    *focus = match rows.first() {
+                        Some(&first) => {
+                            if !rows.contains(&self.option) {
+                                self.option = first;
+                            }
+                            Focus::Options
+                        }
+                        None => Focus::Files,
                     };
                 }
                 None
@@ -319,11 +338,15 @@ impl App {
             Screen::Pick {
                 focus: focus @ Focus::Options,
             } => {
+                let rows = option_rows(&self.tool_list);
+                let row = rows.iter().position(|&r| r == self.option).unwrap_or(0);
                 match key.code {
                     KeyCode::Enter | KeyCode::Tab => *focus = Focus::Files,
                     _ if back => *focus = Focus::Tools,
-                    KeyCode::Up | KeyCode::Char('k') => self.option = OptionRow::Keep,
-                    KeyCode::Down | KeyCode::Char('j') => self.option = OptionRow::Backend,
+                    KeyCode::Up | KeyCode::Char('k') => self.option = rows[row.saturating_sub(1)],
+                    KeyCode::Down | KeyCode::Char('j') => {
+                        self.option = rows[(row + 1).min(rows.len() - 1)];
+                    }
                     KeyCode::Left | KeyCode::Char('h') => self.change_option(false),
                     KeyCode::Right | KeyCode::Char('l' | ' ') => self.change_option(true),
                     _ => {}
@@ -337,10 +360,10 @@ impl App {
                 match key.code {
                     KeyCode::Tab => *focus = Focus::Tools,
                     _ if back => {
-                        *focus = if has_options(&self.tool_list) {
-                            Focus::Options
-                        } else {
+                        *focus = if option_rows(&self.tool_list).is_empty() {
                             Focus::Tools
+                        } else {
+                            Focus::Options
                         };
                     }
                     KeyCode::Char(' ') => {
@@ -374,7 +397,7 @@ impl App {
                         };
                         Some(match tool {
                             Tool::Chapters => start(Job::Chapters),
-                            Tool::SyncCheck => start(Job::SyncCheck),
+                            Tool::SyncCheck => start(Job::SyncCheck { fix: self.fix }),
                             Tool::Transcribe => start(Job::Transcribe),
                             Tool::DialogueSeparation => {
                                 start(Job::Separate(self.keep, self.backend))
@@ -443,6 +466,7 @@ impl App {
     /// Moves the focused option to its next or previous choice.
     fn change_option(&mut self, forward: bool) {
         match self.option {
+            OptionRow::Fix => self.fix = !self.fix,
             OptionRow::Keep => self.keep = cycle(&Keep::CHOICES, self.keep, forward),
             OptionRow::Backend => self.backend = cycle(&Backend::CHOICES, self.backend, forward),
         }
@@ -489,11 +513,11 @@ impl App {
     /// takes the keys in the focused pane.
     fn draw_picker(&mut self, frame: &mut Frame, area: Rect, focus: Focus) {
         let tools_height = u16::try_from(Tool::ALL.len()).unwrap_or(u16::MAX) + 1;
-        let picked = focus != Focus::Tools;
-        let options_height = if picked && has_options(&self.tool_list) {
-            3
-        } else {
+        let options = option_rows(&self.tool_list);
+        let options_height = if focus == Focus::Tools || options.is_empty() {
             0
+        } else {
+            u16::try_from(options.len()).unwrap_or(u16::MAX) + 1
         };
         let [tools_area, options_area, files_area] = Layout::vertical([
             Constraint::Length(tools_height),
@@ -518,14 +542,8 @@ impl App {
             style,
         );
         if options_height > 0 {
-            draw_options(
-                frame,
-                options_area,
-                focus,
-                self.keep,
-                self.backend,
-                self.option,
-            );
+            let picked = picked(&self.files, &self.checked, &self.file_list);
+            self.draw_options(frame, options_area, focus, options, &picked);
         }
         draw_files(
             frame,
@@ -568,6 +586,9 @@ impl App {
                 self.draw_picker(frame, body, focus);
                 match focus {
                     Focus::Tools => "↑↓ move · Enter next · q quit",
+                    Focus::Options if option_rows(&self.tool_list) == [OptionRow::Fix] => {
+                        "Space toggle · Enter files · q back"
+                    }
                     Focus::Options => "↑↓ move · ←→ change · Enter files · q back",
                     Focus::Files => "↑↓ move · Space select · a all · Enter run · q back",
                 }
@@ -709,12 +730,12 @@ fn result_lines(files: &[FileRun], name_width: usize) -> (ToolOutput, Vec<(usize
     (lines, running)
 }
 
-/// Whether the tool highlighted in `tool_list` has options to set.
-fn has_options(tool_list: &ListState) -> bool {
-    match tool_list.selected().and_then(|i| Tool::ALL.get(i)) {
-        Some(Tool::DialogueSeparation) => true,
-        Some(Tool::Chapters | Tool::SyncCheck | Tool::Transcribe) | None => false,
-    }
+/// The option rows of the tool highlighted in `tool_list`.
+fn option_rows(tool_list: &ListState) -> &'static [OptionRow] {
+    tool_list
+        .selected()
+        .and_then(|i| Tool::ALL.get(i))
+        .map_or(&[], |&tool| OptionRow::of(tool))
 }
 
 /// The choice after `current`, or before it, wrapping around the ends.
@@ -724,11 +745,11 @@ fn cycle<T: Copy + PartialEq>(choices: &[T], current: T, forward: bool) -> T {
     choices[(index + step) % choices.len()]
 }
 
-/// What a run does. Separation also needs the side and model the user picked.
+/// What a run does, with the options the user picked.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Job {
     Chapters,
-    SyncCheck,
+    SyncCheck { fix: bool },
     Transcribe,
     Separate(Keep, Backend),
 }
@@ -737,7 +758,7 @@ impl Job {
     fn tool(self) -> Tool {
         match self {
             Job::Chapters => Tool::Chapters,
-            Job::SyncCheck => Tool::SyncCheck,
+            Job::SyncCheck { .. } => Tool::SyncCheck,
             Job::Transcribe => Tool::Transcribe,
             Job::Separate(..) => Tool::DialogueSeparation,
         }
@@ -747,8 +768,9 @@ impl Job {
 /// The choices below the tool's name, such as "Remove voice (TIGER-DnR)".
 fn subtitle(job: Job) -> Option<String> {
     match job {
+        Job::SyncCheck { fix: true } => Some("Fix issues".into()),
         Job::Separate(keep, backend) => Some(format!("{} ({})", keep.label(), backend.label())),
-        Job::Chapters | Job::SyncCheck | Job::Transcribe => None,
+        Job::Chapters | Job::SyncCheck { fix: false } | Job::Transcribe => None,
     }
 }
 
@@ -879,12 +901,19 @@ async fn run_job(
             .await
             .ok_or(Cancelled)?
             .map(|o| chapters_lines(file, o)),
-        // `send_replace` succeeds even after the UI drops the receiver.
-        Job::SyncCheck => sync_check::run(file, cancel, |p| {
-            progress.send_replace(Some(Progress::Scan(p)));
-        })
-        .await
-        .map(|report| sync_check_lines(&report)),
+        Job::SyncCheck { fix } => {
+            let mode = if fix {
+                Mode::Fix { force }
+            } else {
+                Mode::Check
+            };
+            // `send_replace` succeeds even after the UI drops the receiver.
+            sync_check::run(file, mode, cancel, |p| {
+                progress.send_replace(Some(Progress::Sync(p)));
+            })
+            .await
+            .map(|outcome| sync_check_lines(&outcome))
+        }
         Job::Transcribe => {
             transcribe::run(file, transcribe::Backend::Whisper, force, cancel, |p| {
                 progress.send_replace(Some(Progress::Transcription(p)));
@@ -932,7 +961,8 @@ fn chapters_lines(file: &Path, outcome: Outcome) -> ToolOutput {
     }
 }
 
-fn sync_check_lines(report: &Report) -> ToolOutput {
+fn sync_check_lines(outcome: &sync_check::Outcome) -> ToolOutput {
+    let report = &outcome.report;
     let mut lines: ToolOutput = report
         .header()
         .into_iter()
@@ -942,8 +972,36 @@ fn sync_check_lines(report: &Report) -> ToolOutput {
     if report.findings.is_empty() {
         lines.push(Line::from(sync_check::NO_ISSUES).green());
     }
-    // Blank lines keep wrapped findings apart.
-    for (i, finding) in report.findings.iter().enumerate() {
+    lines.extend(finding_lines(&report.findings));
+    match &outcome.fixed {
+        None if report.fixable() > 0 => {
+            lines.push(Line::default());
+            lines.push(Line::from("Turn on Fix in the options to write a fixed copy.").dark_gray());
+        }
+        Some(fixed) if !report.findings.is_empty() => {
+            lines.push(Line::default());
+            let summary = message(&fixed.summary());
+            match fixed {
+                Fixed::Nothing => lines.push(summary.yellow()),
+                Fixed::Wrote { remaining, .. } if remaining.is_empty() => {
+                    lines.push(summary.green());
+                }
+                Fixed::Wrote { remaining, .. } => {
+                    lines.push(summary.red());
+                    lines.push(Line::default());
+                    lines.extend(finding_lines(remaining));
+                }
+            }
+        }
+        None | Some(_) => {}
+    }
+    lines
+}
+
+/// Each finding, coloured by severity. Blank lines keep wrapped findings apart.
+fn finding_lines(findings: &[sync_check::diagnose::Finding]) -> ToolOutput {
+    let mut lines = vec![];
+    for (i, finding) in findings.iter().enumerate() {
         if i > 0 {
             lines.push(Line::default());
         }
@@ -1005,51 +1063,71 @@ fn picked_style() -> Style {
     Style::new().fg(Color::Cyan)
 }
 
-/// Draws a row per option, with its choices and what the current one does.
-fn draw_options(
-    frame: &mut Frame,
-    area: Rect,
-    focus: Focus,
-    keep: Keep,
-    backend: Backend,
-    row: OptionRow,
-) {
-    let line = |this: OptionRow, label: &str, choices: Vec<(&str, bool)>, summary: &str| {
-        let focused = focus == Focus::Options && row == this;
-        let mut spans = vec![Span::from(if focused { "› " } else { "  " })];
-        spans.push(Span::from(format!("{label:<8}")));
-        for (choice, chosen) in choices {
-            spans.push(match (chosen, focused) {
-                (true, true) => Span::styled(choice.to_string(), highlight()),
-                (true, false) => Span::styled(choice.to_string(), picked_style()),
-                (false, _) => Span::from(choice.to_string()),
-            });
-            spans.push(Span::from("  "));
-        }
-        spans.push(Span::from(summary.to_string()).dark_gray());
-        Line::from(spans)
-    };
-    let lines = vec![
-        line(
-            OptionRow::Keep,
-            "Action",
-            Keep::CHOICES
-                .iter()
-                .map(|&k| (k.label(), k == keep))
-                .collect(),
-            keep.summary(),
-        ),
-        line(
-            OptionRow::Backend,
-            "Model",
-            Backend::CHOICES
-                .iter()
-                .map(|&b| (b.label(), b == backend))
-                .collect(),
-            backend.summary(),
-        ),
-    ];
-    frame.render_widget(Paragraph::new(lines).block(panel("Options")), area);
+impl App {
+    /// Draws each of `rows`, with its choices and what the current one does. `picked` names the
+    /// files a run would cover.
+    fn draw_options(
+        &self,
+        frame: &mut Frame,
+        area: Rect,
+        focus: Focus,
+        rows: &[OptionRow],
+        picked: &[PathBuf],
+    ) {
+        let lines = rows.iter().map(|&row| {
+            let focused = focus == Focus::Options && self.option == row;
+            let (label, choices, summary): (_, Vec<(&str, bool)>, _) = match row {
+                OptionRow::Fix => (
+                    "Fix",
+                    vec![(if self.fix { "[x]" } else { "[ ]" }, true)],
+                    fix_summary(picked),
+                ),
+                OptionRow::Keep => (
+                    "Action",
+                    Keep::CHOICES
+                        .iter()
+                        .map(|&k| (k.label(), k == self.keep))
+                        .collect(),
+                    vec![Span::from(self.keep.summary())],
+                ),
+                OptionRow::Backend => (
+                    "Model",
+                    Backend::CHOICES
+                        .iter()
+                        .map(|&b| (b.label(), b == self.backend))
+                        .collect(),
+                    vec![Span::from(self.backend.summary())],
+                ),
+            };
+            let mut spans = vec![Span::from(if focused { "› " } else { "  " })];
+            spans.push(Span::from(format!("{label:<8}")));
+            for (choice, chosen) in choices {
+                spans.push(match (chosen, focused) {
+                    (true, true) => Span::styled(choice.to_string(), highlight()),
+                    (true, false) => Span::styled(choice.to_string(), picked_style()),
+                    (false, _) => Span::from(choice.to_string()),
+                });
+                spans.push(Span::from("  "));
+            }
+            spans.extend(summary.into_iter().map(Span::dark_gray));
+            Line::from(spans)
+        });
+        let lines: Vec<Line> = lines.collect();
+        frame.render_widget(Paragraph::new(lines).block(panel("Options")), area);
+    }
+}
+
+/// What fixing writes, naming the copy when the run covers one file.
+fn fix_summary(picked: &[PathBuf]) -> Vec<Span<'static>> {
+    match picked {
+        [file] => vec![
+            Span::from("Fix issues and write "),
+            File(&sync_check::output_path(file)).display(),
+        ],
+        _ => vec![Span::from(
+            "Fix issues and write a .synced copy of each file",
+        )],
+    }
 }
 
 fn draw_files(
@@ -1180,7 +1258,10 @@ fn state_mark(state: &FileState) -> Span<'static> {
 fn draw_progress(frame: &mut Frame, area: Rect, progress: Option<Progress>) {
     match progress {
         None => {}
-        Some(Progress::Scan(progress)) => draw_scan_progress(frame, area, progress),
+        Some(Progress::Sync(progress)) => match progress.ratio() {
+            Some(ratio) => frame.render_widget(gauge(ratio, progress.to_string()), area),
+            None => frame.render_widget(Line::from(progress.to_string()), area),
+        },
         Some(Progress::Transcription(progress)) => match progress.ratio() {
             Some(ratio) => frame.render_widget(gauge(ratio, progress.to_string()), area),
             None => frame.render_widget(Line::from(progress.to_string()), area),
@@ -1190,24 +1271,6 @@ fn draw_progress(frame: &mut Frame, area: Rect, progress: Option<Progress>) {
             None => frame.render_widget(Line::from(progress.to_string()), area),
         },
     }
-}
-
-fn draw_scan_progress(frame: &mut Frame, area: Rect, progress: sync_check::Progress) {
-    let sync_check::Progress { packets, expected } = progress;
-    let Some(expected) = expected.filter(|&n| n > 0) else {
-        frame.render_widget(Line::from(format!("{} packets", thousands(packets))), area);
-        return;
-    };
-    // The total is an estimate, so hold below 100% until the result replaces this screen.
-    #[allow(clippy::cast_precision_loss)]
-    let ratio = (packets as f64 / expected as f64).min(0.99);
-    let label = format!(
-        "{:.0}% · {} of ~{} packets",
-        ratio * 100.0,
-        thousands(packets),
-        thousands(expected)
-    );
-    frame.render_widget(gauge(ratio, label), area);
 }
 
 fn gauge(ratio: f64, label: String) -> Gauge<'static> {
@@ -1342,7 +1405,11 @@ mod tests {
 
     #[test]
     fn ignores_results_from_other_runs() {
-        let mut app = running(Job::SyncCheck, RunId(1), CancellationToken::new());
+        let mut app = running(
+            Job::SyncCheck { fix: false },
+            RunId(1),
+            CancellationToken::new(),
+        );
 
         let _ = finish(&mut app, RunId(0), 0, output("stale"));
 
@@ -1353,7 +1420,7 @@ mod tests {
     fn keeps_running_until_every_file_has_finished() {
         let mut app = running_on(
             &["/videos/a.mkv", "/videos/b.mkv"],
-            Job::SyncCheck,
+            Job::SyncCheck { fix: false },
             RunId(0),
             CancellationToken::new(),
         );
@@ -1373,7 +1440,11 @@ mod tests {
 
     #[test]
     fn shows_a_lone_file_without_its_name() {
-        let mut app = running(Job::SyncCheck, RunId(0), CancellationToken::new());
+        let mut app = running(
+            Job::SyncCheck { fix: false },
+            RunId(0),
+            CancellationToken::new(),
+        );
 
         let _ = finish(&mut app, RunId(0), 0, output("clean"));
 
@@ -1609,7 +1680,7 @@ mod tests {
             focus: Focus::Tools,
         });
 
-        press(&mut app, &[KeyCode::Down, KeyCode::Enter]);
+        press(&mut app, &[KeyCode::Down, KeyCode::Down, KeyCode::Enter]);
 
         assert!(matches!(
             app.screen,
@@ -1617,7 +1688,7 @@ mod tests {
                 focus: Focus::Files
             }
         ));
-        assert_eq!(app.tool_list.selected(), Some(1));
+        assert_eq!(app.tool_list.selected(), Some(2));
     }
 
     #[tokio::test]
@@ -1682,7 +1753,7 @@ mod tests {
     fn shows_each_file_as_it_finishes() {
         let mut app = running_on(
             &["/videos/a.mkv", "/videos/b.mkv", "/videos/c.mkv"],
-            Job::SyncCheck,
+            Job::SyncCheck { fix: false },
             RunId(0),
             CancellationToken::new(),
         );
@@ -1779,6 +1850,45 @@ mod tests {
             panic!("expected a run");
         };
         assert_eq!(*job, Job::Separate(Keep::Ambience, Backend::Sam));
+    }
+
+    #[tokio::test]
+    async fn runs_a_sync_check_that_fixes_once_fix_is_ticked() {
+        let mut app = picking(Tool::SyncCheck, Focus::Tools);
+
+        press(
+            &mut app,
+            &[
+                KeyCode::Enter,
+                KeyCode::Char(' '),
+                KeyCode::Enter,
+                KeyCode::Enter,
+            ],
+        );
+
+        let Screen::Running { job, .. } = &app.screen else {
+            panic!("expected a run");
+        };
+        assert_eq!(*job, Job::SyncCheck { fix: true });
+    }
+
+    #[test]
+    fn names_the_fixed_copy_of_a_lone_file() {
+        let summary = |picked: &[PathBuf]| {
+            fix_summary(picked)
+                .iter()
+                .map(|span| span.content.to_string())
+                .collect::<String>()
+        };
+
+        assert_eq!(
+            summary(&["/videos/talk.mp4".into()]),
+            "Fix issues and write talk.synced.mp4"
+        );
+        assert_eq!(
+            summary(&["/videos/a.mkv".into(), "/videos/b.mkv".into()]),
+            "Fix issues and write a .synced copy of each file"
+        );
     }
 
     #[test]

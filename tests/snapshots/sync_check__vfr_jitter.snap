@@ -10,4 +10,6 @@ Audio #1: aac, 48000 Hz, 469 packets, 0:00.000 to 0:10.005
 
 minor: video #0 frame intervals vary from 15.7 ms to 17.3 ms (599 of 599 off nominal), drifting up to 0.7 ms from constant-rate positions. Fix: retime video to a constant frame rate (no re-encode).
 
+Run `vt sync-check --fix "vfr-jitter.mp4"` to write a fixed copy.
+
 stderr:

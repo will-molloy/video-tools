@@ -190,6 +190,10 @@ impl Nanos {
         Nanos(millis * 1_000_000)
     }
 
+    pub fn as_nanos(self) -> i64 {
+        self.0
+    }
+
     pub fn abs(self) -> Self {
         Nanos(self.0.abs())
     }
