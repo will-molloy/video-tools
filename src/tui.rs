@@ -465,11 +465,16 @@ impl App {
         ControlFlow::Continue(())
     }
 
-    /// Draws the tools, any options for the highlighted tool, then the files, marking the row that
+    /// Draws the tools, any options for the picked tool, then the files, marking the row that
     /// takes the keys in the focused pane.
     fn draw_picker(&mut self, frame: &mut Frame, area: Rect, focus: Focus) {
         let tools_height = u16::try_from(Tool::ALL.len()).unwrap_or(u16::MAX) + 1;
-        let options_height = if has_options(&self.tool_list) { 3 } else { 0 };
+        let picked = focus != Focus::Tools;
+        let options_height = if picked && has_options(&self.tool_list) {
+            3
+        } else {
+            0
+        };
         let [tools_area, options_area, files_area] = Layout::vertical([
             Constraint::Length(tools_height),
             Constraint::Length(options_height),
