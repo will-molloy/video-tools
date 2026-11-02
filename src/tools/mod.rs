@@ -5,7 +5,7 @@ use std::{
 
 use anyhow::anyhow;
 
-use crate::quote::quote_name;
+use crate::display;
 
 pub mod chapters;
 pub mod dialogue_separation;
@@ -19,7 +19,7 @@ pub struct Exists(pub PathBuf);
 
 impl fmt::Display for Exists {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{} already exists", quote_name(&self.0))
+        write!(f, "{} already exists", display::name(&self.0))
     }
 }
 

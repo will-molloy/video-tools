@@ -1,4 +1,4 @@
-//! Runs the Python ML stages in `ml/`, which `ml/README.md` documents.
+//! Runs the Python ML subcommands in `ml/`, which `ml/README.md` documents.
 
 pub mod child;
 pub mod cli;
@@ -10,16 +10,16 @@ use std::path::{Path, PathBuf};
 use anyhow::{Result, bail};
 use tokio::process::Command;
 
-use crate::quote::quote;
+use crate::display;
 
 const ML_PROJECT_ENV: &str = "VT_ML_PROJECT";
 const GPU_ENV: &str = "VT_GPU";
 
-/// `uv run vt-ml <stage>` in vt's `ml/` project. Arguments for the stage follow.
+/// `uv run vt-ml <subcommand>` in vt's `ml/` project. Arguments for the subcommand follow.
 ///
 /// With a model extra, uv also installs that model's dependencies and the GPU's torch build on
 /// first use. A model always runs on the GPU, so this fails if there's none.
-pub fn command(stage: &str, model: Option<&str>) -> Result<Command> {
+pub fn command(subcommand: &str, model: Option<&str>) -> Result<Command> {
     let project = std::env::var_os(ML_PROJECT_ENV).map_or_else(
         || PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/ml")),
         PathBuf::from,
@@ -27,7 +27,7 @@ pub fn command(stage: &str, model: Option<&str>) -> Result<Command> {
     if !project.join("pyproject.toml").is_file() {
         bail!(
             "no Python project at {}; set {ML_PROJECT_ENV} to vt's ml/ directory",
-            quote(&project)
+            display::path(&project)
         );
     }
     let mut command = Command::new("uv");
@@ -35,11 +35,11 @@ pub fn command(stage: &str, model: Option<&str>) -> Result<Command> {
     if let Some(model) = model {
         command.args(["--extra", model, "--extra", Gpu::detect()?.extra()]);
     }
-    command.args(["vt-ml", stage]);
+    command.args(["vt-ml", subcommand]);
     Ok(command)
 }
 
-/// The GPU platform, which picks the torch build the stage installs.
+/// The GPU platform, which picks the torch build `vt-ml` installs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Gpu {
     Rocm,
@@ -122,7 +122,7 @@ mod tests {
     }
 
     #[test]
-    fn runs_a_stage_without_a_model_in_the_ml_project() {
+    fn runs_a_subcommand_without_a_model_in_the_ml_project() {
         let command = command("transcribe", None).unwrap();
 
         let args: Vec<_> = command.as_std().get_args().collect();

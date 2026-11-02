@@ -10,13 +10,13 @@ const OPEN: char = '\u{E000}';
 const CLOSE: char = '\u{E001}';
 
 /// `path`, marked.
-pub fn quote(path: &Path) -> String {
+pub fn path(path: &Path) -> String {
     format!("{OPEN}{}{CLOSE}", path.display())
 }
 
 /// The last component of `path`, marked, or the whole path if it has none.
-pub fn quote_name(path: &Path) -> String {
-    quote(path.file_name().map_or(path, Path::new))
+pub fn name(path: &Path) -> String {
+    self::path(path.file_name().map_or(path, Path::new))
 }
 
 /// `text` for the CLI, with paths in double quotes.
@@ -40,8 +40,8 @@ mod tests {
     fn quotes_paths_for_the_cli() {
         let text = format!(
             "{} is in {}",
-            quote_name(Path::new("/v/talk 2.srt")),
-            quote(Path::new("/v"))
+            name(Path::new("/v/talk 2.srt")),
+            path(Path::new("/v"))
         );
 
         assert_eq!(plain(&text), "\"talk 2.srt\" is in \"/v\"");
@@ -49,11 +49,7 @@ mod tests {
 
     #[test]
     fn splits_paths_from_the_text_around_them() {
-        let text = format!(
-            "{} has {} lines.",
-            quote_name(Path::new("/v/talk 2.srt")),
-            12
-        );
+        let text = format!("{} has {} lines.", name(Path::new("/v/talk 2.srt")), 12);
 
         assert_eq!(
             runs(&text).collect::<Vec<_>>(),

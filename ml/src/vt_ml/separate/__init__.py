@@ -8,7 +8,7 @@ from pathlib import Path
 
 from vt_ml.errors import UsageError
 from vt_ml.separate import backends, pipeline
-from vt_ml.stage import Finished
+from vt_ml.subcommand import Finished
 
 
 class Separate:
@@ -64,4 +64,4 @@ def _read_spans(path: Path) -> list[tuple[float, float]]:
     return spans
 
 
-STAGE = Separate()
+SUBCOMMAND = Separate()

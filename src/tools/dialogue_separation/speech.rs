@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use crate::srt::Block;
 
-/// Added either side of a line. The stage's fade stays within it, so the speech itself is never
+/// Added either side of a line. `vt-ml`'s fade stays within it, so the speech itself is never
 /// faded (`FADE_S` in `ml/src/vt_ml/separate/pipeline.py`).
 const PAD: Duration = Duration::from_millis(250);
 
@@ -22,7 +22,7 @@ pub struct Span {
 }
 
 /// Padded, sorted, and merged spans for the transcript's lines. They aren't clamped to the file,
-/// since the stage knows its length to the sample.
+/// since `vt-ml` knows its length to the sample.
 pub fn spans(blocks: &[Block]) -> Vec<Span> {
     let mut padded: Vec<Span> = blocks
         .iter()
@@ -43,7 +43,7 @@ pub fn spans(blocks: &[Block]) -> Vec<Span> {
     merged
 }
 
-/// The spans as the JSON the stage reads: a list of `[start, end]` in seconds.
+/// The spans as the JSON `vt-ml` reads: a list of `[start, end]` in seconds.
 pub fn json(spans: &[Span]) -> String {
     let pairs: Vec<[f64; 2]> = spans
         .iter()

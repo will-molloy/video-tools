@@ -1,9 +1,10 @@
-//! The JSON lines an ML stage writes to stdout. `ml/README.md` documents them.
+//! The JSON lines `vt-ml` writes to stdout. `ml/README.md` documents them.
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
-/// `R` is the stage's result, which `done` carries alongside the stats every stage reports.
+/// `R` is the subcommand's result, which `done` carries alongside the stats every subcommand
+/// reports.
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(
     tag = "type",
@@ -26,7 +27,7 @@ pub struct Done<R> {
     pub stats: Stats,
 }
 
-/// How a stage ran.
+/// How a subcommand ran.
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 pub struct Stats {
     pub device: String,
@@ -36,7 +37,7 @@ pub struct Stats {
     pub peak_vram_mb: Option<f64>,
 }
 
-/// Any line that isn't one of the messages is an error. The stage reserves stdout for the
+/// Any line that isn't one of the messages is an error. `vt-ml` reserves stdout for the
 /// protocol, so a stray line means something is badly wrong.
 pub fn parse<R: DeserializeOwned>(line: &str) -> Result<Message<R>> {
     serde_json::from_str(line).with_context(|| format!("vt-ml wrote a malformed line: {line:?}"))

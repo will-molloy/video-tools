@@ -432,7 +432,7 @@ fn cancels_on_sigint_and_cleans_up() {
         .spawn()
         .unwrap();
 
-    // Waits until the stage is mid-run, with its stems open in a partial cache entry.
+    // Waits until `vt-ml` is mid-run, with its stems open in a partial cache entry.
     let deadline = Instant::now() + Duration::from_secs(60);
     let partial = loop {
         let partial = workspace
@@ -443,7 +443,7 @@ fn cancels_on_sigint_and_cleans_up() {
         if let Some(partial) = partial {
             break partial.to_str().unwrap().to_string();
         }
-        assert!(Instant::now() < deadline, "the stage never started");
+        assert!(Instant::now() < deadline, "vt-ml never started");
         thread::sleep(Duration::from_millis(20));
     };
     // uv and Python, which both name the partial entry in their arguments.

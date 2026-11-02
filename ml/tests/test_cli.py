@@ -1,5 +1,5 @@
-"""Runs the entry point with stub stages, in a subprocess like `vt` does, and checks the protocol
-it speaks."""
+"""Runs the entry point with stub subcommands, in a subprocess like `vt` does, and checks the
+protocol it speaks."""
 
 import json
 import signal
@@ -7,12 +7,12 @@ import subprocess
 import sys
 from pathlib import Path
 
-# Defines stub stages, then runs the entry point with them and the given arguments.
+# Defines stub subcommands, then runs the entry point with them and the given arguments.
 SCRIPT = """
 import sys, time
 from vt_ml import cli
 from vt_ml.errors import UsageError
-from vt_ml.stage import Finished
+from vt_ml.subcommand import Finished
 
 class Echo:
     def configure(self, parser):
@@ -55,7 +55,7 @@ def run(*args: str):
     return result.returncode, messages, result.stderr
 
 
-def test_runs_a_stage_and_reports_its_result():
+def test_runs_a_subcommand_and_reports_its_result():
     code, messages, _ = run("echo", "--word", "hello")
 
     assert code == 0
@@ -96,14 +96,14 @@ def test_reports_bad_arguments():
     assert messages == [{"type": "error", "message": "the following arguments are required: --word"}]
 
 
-def test_reports_an_unknown_stage():
+def test_reports_an_unknown_subcommand():
     code, messages, _ = run("separate")
 
     assert code == 2
     assert messages == [
         {
             "type": "error",
-            "message": "argument stage: invalid choice: 'separate' (choose from echo, sleep)",
+            "message": "argument subcommand: invalid choice: 'separate' (choose from echo, sleep)",
         }
     ]
 
@@ -124,7 +124,7 @@ def test_keeps_library_output_off_the_protocol_stream():
     assert result.stderr == "from python\nfrom c\n"
 
 
-def test_stops_on_sigterm_and_lets_the_stage_clean_up(tmp_path: Path):
+def test_stops_on_sigterm_and_lets_the_subcommand_clean_up(tmp_path: Path):
     partial = tmp_path / "partial"
     child = subprocess.Popen(
         command("sleep", "--partial", str(partial)),

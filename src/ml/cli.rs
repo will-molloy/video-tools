@@ -10,7 +10,7 @@ use anyhow::{Context, Result};
 use tokio::signal::unix::{SignalKind, signal};
 use tokio_util::sync::CancellationToken;
 
-use crate::{ffprobe::Cancelled, quote};
+use crate::{display, ffprobe::Cancelled};
 
 const SIGINT: u8 = 2;
 const SIGTERM: u8 = 15;
@@ -18,8 +18,8 @@ const SIGTERM: u8 = 15;
 /// Awaits `run`, then prints its outcome's `lines`. Exits 0 on success, or 128 plus the signal
 /// number when SIGINT or SIGTERM cancels it. Errors exit 2 from `main`.
 ///
-/// A signal cancels `cancel`, and the run keeps going until it has cleaned up, so a stage's
-/// subprocess never outlives `vt`.
+/// A signal cancels `cancel`, and the run keeps going until it has cleaned up, so `vt-ml`
+/// never outlives `vt`.
 pub async fn run<T>(
     cancel: &CancellationToken,
     run: impl Future<Output = Result<T>>,
@@ -49,7 +49,7 @@ pub async fn run<T>(
         return Ok(ExitCode::from(128 + signal));
     }
     for line in lines(result?) {
-        println!("{}", quote::plain(&line));
+        println!("{}", display::plain(&line));
     }
     Ok(ExitCode::SUCCESS)
 }

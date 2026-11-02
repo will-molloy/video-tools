@@ -11,7 +11,7 @@ use std::{
 
 use anyhow::{Context, Result};
 
-use crate::quote::quote;
+use crate::display;
 
 const PARTIAL: &str = ".partial-";
 
@@ -33,7 +33,8 @@ pub struct Scratch {
 
 impl Scratch {
     pub fn new(root: &Path, prefix: &str) -> Result<Scratch> {
-        fs::create_dir_all(root).with_context(|| format!("failed to create {}", quote(root)))?;
+        fs::create_dir_all(root)
+            .with_context(|| format!("failed to create {}", display::path(root)))?;
         sweep(root);
 
         // The counter keeps a cancelled run that's still cleaning up from colliding with its
@@ -41,7 +42,8 @@ impl Scratch {
         static RUNS: AtomicU64 = AtomicU64::new(0);
         let run = RUNS.fetch_add(1, Ordering::Relaxed);
         let dir = root.join(format!("{prefix}{PARTIAL}{}-{run}", std::process::id()));
-        fs::create_dir(&dir).with_context(|| format!("failed to create {}", quote(&dir)))?;
+        fs::create_dir(&dir)
+            .with_context(|| format!("failed to create {}", display::path(&dir)))?;
         Ok(Scratch { dir })
     }
 
@@ -53,8 +55,9 @@ impl Scratch {
     /// have made `target` first, in which case this one is removed.
     pub fn persist(self, target: &Path) -> Result<()> {
         if !target.exists() {
-            fs::rename(&self.dir, target)
-                .with_context(|| format!("failed to move {} into place", quote(&self.dir)))?;
+            fs::rename(&self.dir, target).with_context(|| {
+                format!("failed to move {} into place", display::path(&self.dir))
+            })?;
         }
         Ok(())
     }

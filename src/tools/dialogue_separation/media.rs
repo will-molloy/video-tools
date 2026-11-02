@@ -10,9 +10,8 @@ use std::{
 use anyhow::{Context, Result, bail};
 
 use crate::{
-    ffmpeg,
+    display, ffmpeg,
     ffprobe::{self, Stream, StreamKind},
-    quote::quote,
 };
 
 /// How to write the kept stem.
@@ -148,7 +147,8 @@ pub async fn write(input: &Path, stem: &Path, output: &Output) -> Result<()> {
     }
     args.push(partial.0.clone().into());
     ffmpeg::run(args, "write the output").await?;
-    fs::rename(&partial.0, path).with_context(|| format!("failed to write {}", quote(path)))?;
+    fs::rename(&partial.0, path)
+        .with_context(|| format!("failed to write {}", display::path(path)))?;
     Ok(())
 }
 
