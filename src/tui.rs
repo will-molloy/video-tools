@@ -149,6 +149,9 @@ struct App {
     tool_list: ListState,
     file_list: ListState,
     checked: BTreeSet<usize>,
+    keep: Keep,
+    backend: Backend,
+    option: OptionRow,
 
     screen: Screen,
     next_run: u64,
@@ -165,19 +168,20 @@ type RunEvent = (RunId, usize, FileEvent);
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Focus {
     Tools,
+    Options,
     Files,
+}
+
+/// A row of the options for the picked tool.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OptionRow {
+    Keep,
+    Backend,
 }
 
 enum Screen {
     Pick {
         focus: Focus,
-    },
-    PickKeep {
-        list: ListState,
-    },
-    PickBackend {
-        keep: Keep,
-        list: ListState,
     },
     Running {
         job: Job,
@@ -212,6 +216,9 @@ impl App {
             tool_list: ListState::default().with_selected(first_index(&Tool::ALL)),
             file_list: ListState::default().with_selected(first_index(&files)),
             checked: BTreeSet::new(),
+            keep: Keep::CHOICES[0],
+            backend: Backend::CHOICES[0],
+            option: OptionRow::Keep,
             dir,
             files,
             screen: Screen::Pick {
@@ -275,7 +282,25 @@ impl App {
                 }
                 navigate(&mut self.tool_list, key.code);
                 if matches!(key.code, KeyCode::Enter | KeyCode::Tab) {
-                    *focus = Focus::Files;
+                    *focus = if has_options(&self.tool_list) {
+                        Focus::Options
+                    } else {
+                        Focus::Files
+                    };
+                }
+                None
+            }
+            Screen::Pick {
+                focus: focus @ Focus::Options,
+            } => {
+                match key.code {
+                    KeyCode::Enter | KeyCode::Tab => *focus = Focus::Files,
+                    _ if back => *focus = Focus::Tools,
+                    KeyCode::Up | KeyCode::Char('k') => self.option = OptionRow::Keep,
+                    KeyCode::Down | KeyCode::Char('j') => self.option = OptionRow::Backend,
+                    KeyCode::Left | KeyCode::Char('h') => self.change_option(false),
+                    KeyCode::Right | KeyCode::Char('l' | ' ') => self.change_option(true),
+                    _ => {}
                 }
                 None
             }
@@ -285,7 +310,13 @@ impl App {
                 navigate(&mut self.file_list, key.code);
                 match key.code {
                     KeyCode::Tab => *focus = Focus::Tools,
-                    _ if back => *focus = Focus::Tools,
+                    _ if back => {
+                        *focus = if has_options(&self.tool_list) {
+                            Focus::Options
+                        } else {
+                            Focus::Tools
+                        };
+                    }
                     KeyCode::Char(' ') => {
                         if let Some(i) = self.file_list.selected().filter(|&i| i < self.files.len())
                             && !self.checked.remove(&i)
@@ -319,45 +350,12 @@ impl App {
                             Tool::Chapters => start(Job::Chapters),
                             Tool::SyncCheck => start(Job::SyncCheck),
                             Tool::Transcribe => start(Job::Transcribe),
-                            Tool::DialogueSeparation => keep_picker(None),
+                            Tool::DialogueSeparation => {
+                                start(Job::Separate(self.keep, self.backend))
+                            }
                         })
                     }
                     _ => None,
-                }
-            }
-            Screen::PickKeep { list } => {
-                if back {
-                    Some(Screen::Pick {
-                        focus: Focus::Files,
-                    })
-                } else {
-                    navigate(list, key.code);
-                    let selected = list.selected().and_then(|i| Keep::CHOICES.get(i));
-                    match (key.code, selected) {
-                        (KeyCode::Enter, Some(&keep)) => Some(backend_picker(keep)),
-                        _ => None,
-                    }
-                }
-            }
-            Screen::PickBackend { keep, list } => {
-                if back {
-                    Some(keep_picker(Some(*keep)))
-                } else {
-                    navigate(list, key.code);
-                    let selected = list.selected().and_then(|i| Backend::CHOICES.get(i));
-                    match (key.code, selected) {
-                        (KeyCode::Enter, Some(&backend)) => Some(start(
-                            &mut self.next_run,
-                            &self.results_tx,
-                            Job::Separate(*keep, backend),
-                            picked(&self.files, &self.checked, &self.file_list)
-                                .into_iter()
-                                .map(FileRun::waiting)
-                                .collect(),
-                            false,
-                        )),
-                        _ => None,
-                    }
                 }
             }
             Screen::ConfirmOverwrite { job, files } => match key.code {
@@ -423,6 +421,14 @@ impl App {
         ControlFlow::Continue(())
     }
 
+    /// Moves the focused option to its next or previous choice.
+    fn change_option(&mut self, forward: bool) {
+        match self.option {
+            OptionRow::Keep => self.keep = cycle(&Keep::CHOICES, self.keep, forward),
+            OptionRow::Backend => self.backend = cycle(&Backend::CHOICES, self.backend, forward),
+        }
+    }
+
     fn on_event(&mut self, run: RunId, index: usize, event: FileEvent) -> ControlFlow<()> {
         let Screen::Running {
             job,
@@ -459,6 +465,53 @@ impl App {
         ControlFlow::Continue(())
     }
 
+    /// Draws the tools, any options for the highlighted tool, then the files, marking the row that
+    /// takes the keys in the focused pane.
+    fn draw_picker(&mut self, frame: &mut Frame, area: Rect, focus: Focus) {
+        let tools_height = u16::try_from(Tool::ALL.len()).unwrap_or(u16::MAX) + 1;
+        let options_height = if has_options(&self.tool_list) { 3 } else { 0 };
+        let [tools_area, options_area, files_area] = Layout::vertical([
+            Constraint::Length(tools_height),
+            Constraint::Length(options_height),
+            Constraint::Fill(1),
+        ])
+        .areas(area);
+
+        let rows = Tool::ALL.map(|t| (t.name(), t.summary()));
+        let style = match focus {
+            Focus::Tools => highlight(),
+
+            // Keeps the picked tool visible while the keys move on.
+            Focus::Options | Focus::Files => picked_style(),
+        };
+        draw_choices(
+            frame,
+            tools_area,
+            panel("Pick a tool"),
+            &rows,
+            &mut self.tool_list,
+            style,
+        );
+        if options_height > 0 {
+            draw_options(
+                frame,
+                options_area,
+                focus,
+                self.keep,
+                self.backend,
+                self.option,
+            );
+        }
+        draw_files(
+            frame,
+            files_area,
+            focus,
+            &self.files,
+            &self.checked,
+            &mut self.file_list,
+        );
+    }
+
     fn draw(&mut self, frame: &mut Frame) {
         let [header, body, footer] = Layout::vertical([
             Constraint::Length(1),
@@ -473,15 +526,6 @@ impl App {
                 let width = usize::from(header.width).saturating_sub(prefix);
                 vec![Span::from(truncate_left(&tilde(&self.dir), width))]
             }
-            Screen::PickKeep { .. } => vec![
-                subject(&picked(&self.files, &self.checked, &self.file_list)),
-                Tool::DialogueSeparation.name().into(),
-            ],
-            Screen::PickBackend { keep, .. } => vec![
-                subject(&picked(&self.files, &self.checked, &self.file_list)),
-                Tool::DialogueSeparation.name().into(),
-                keep.label().into(),
-            ],
             Screen::Running { files, job, .. }
             | Screen::ConfirmOverwrite { files, job, .. }
             | Screen::Output { files, job, .. } => {
@@ -495,36 +539,13 @@ impl App {
 
         let hints = match &mut self.screen {
             Screen::Pick { focus } => {
-                draw_picker(
-                    frame,
-                    body,
-                    *focus,
-                    &mut self.tool_list,
-                    &self.files,
-                    &self.checked,
-                    &mut self.file_list,
-                );
+                let focus = *focus;
+                self.draw_picker(frame, body, focus);
                 match focus {
-                    Focus::Tools => "↑↓ move · Enter files · q quit",
+                    Focus::Tools => "↑↓ move · Enter next · q quit",
+                    Focus::Options => "↑↓ move · ←→ change · Enter files · q back",
                     Focus::Files => "↑↓ move · Space select · a all · Enter run · q back",
                 }
-            }
-            Screen::PickKeep { list, .. } => {
-                let rows = Keep::CHOICES.map(|k| (k.label(), k.summary()));
-                draw_choices(
-                    frame,
-                    body,
-                    panel("Pick what to remove"),
-                    &rows,
-                    list,
-                    highlight(),
-                );
-                "↑↓ move · Enter pick · q back"
-            }
-            Screen::PickBackend { list, .. } => {
-                let rows = Backend::CHOICES.map(|b| (b.label(), b.summary()));
-                draw_choices(frame, body, panel("Pick a model"), &rows, list, highlight());
-                "↑↓ move · Enter run · q back"
             }
             Screen::Running {
                 job,
@@ -644,22 +665,19 @@ fn output_lines(files: &[FileRun]) -> ToolOutput {
     output
 }
 
-/// Asks what a separation removes, with `keep` selected, or the first choice.
-fn keep_picker(keep: Option<Keep>) -> Screen {
-    let index = keep.map_or(first_index(&Keep::CHOICES), |keep| {
-        Keep::CHOICES.iter().position(|&k| k == keep)
-    });
-    Screen::PickKeep {
-        list: ListState::default().with_selected(index),
+/// Whether the tool highlighted in `tool_list` has options to set.
+fn has_options(tool_list: &ListState) -> bool {
+    match tool_list.selected().and_then(|i| Tool::ALL.get(i)) {
+        Some(Tool::DialogueSeparation) => true,
+        Some(Tool::Chapters | Tool::SyncCheck | Tool::Transcribe) | None => false,
     }
 }
 
-/// Asks which model separates the files, offering the default first.
-fn backend_picker(keep: Keep) -> Screen {
-    Screen::PickBackend {
-        keep,
-        list: ListState::default().with_selected(first_index(&Backend::CHOICES)),
-    }
+/// The choice after `current`, or before it, wrapping around the ends.
+fn cycle<T: Copy + PartialEq>(choices: &[T], current: T, forward: bool) -> T {
+    let index = choices.iter().position(|&c| c == current).unwrap_or(0);
+    let step = if forward { 1 } else { choices.len() - 1 };
+    choices[(index + step) % choices.len()]
 }
 
 /// What a run does. Separation also needs the side and model the user picked.
@@ -938,36 +956,55 @@ fn highlight() -> Style {
         .add_modifier(Modifier::BOLD)
 }
 
-/// Draws the tools above the files, marking the row that takes the keys in the focused pane.
-fn draw_picker(
+fn picked_style() -> Style {
+    Style::new().fg(Color::Cyan)
+}
+
+/// Draws a row per option, with its choices and what the current one does.
+fn draw_options(
     frame: &mut Frame,
     area: Rect,
     focus: Focus,
-    tool_list: &mut ListState,
-    files: &[PathBuf],
-    checked: &BTreeSet<usize>,
-    file_list: &mut ListState,
+    keep: Keep,
+    backend: Backend,
+    row: OptionRow,
 ) {
-    let tools_height = u16::try_from(Tool::ALL.len()).unwrap_or(u16::MAX) + 1;
-    let [tools_area, files_area] =
-        Layout::vertical([Constraint::Length(tools_height), Constraint::Fill(1)]).areas(area);
-
-    let rows = Tool::ALL.map(|t| (t.name(), t.summary()));
-    let style = match focus {
-        Focus::Tools => highlight(),
-
-        // Keeps the picked tool visible while the keys move through the files.
-        Focus::Files => Style::new().fg(Color::Cyan),
+    let line = |this: OptionRow, label: &str, choices: Vec<(&str, bool)>, summary: &str| {
+        let focused = focus == Focus::Options && row == this;
+        let mut spans = vec![Span::from(if focused { "› " } else { "  " })];
+        spans.push(Span::from(format!("{label:<8}")));
+        for (choice, chosen) in choices {
+            spans.push(match (chosen, focused) {
+                (true, true) => Span::styled(choice.to_string(), highlight()),
+                (true, false) => Span::styled(choice.to_string(), picked_style()),
+                (false, _) => Span::from(choice.to_string()),
+            });
+            spans.push(Span::from("  "));
+        }
+        spans.push(Span::from(summary.to_string()).dark_gray());
+        Line::from(spans)
     };
-    draw_choices(
-        frame,
-        tools_area,
-        panel("Pick a tool"),
-        &rows,
-        tool_list,
-        style,
-    );
-    draw_files(frame, files_area, focus, files, checked, file_list);
+    let lines = vec![
+        line(
+            OptionRow::Keep,
+            "Action",
+            Keep::CHOICES
+                .iter()
+                .map(|&k| (k.label(), k == keep))
+                .collect(),
+            keep.summary(),
+        ),
+        line(
+            OptionRow::Backend,
+            "Model",
+            Backend::CHOICES
+                .iter()
+                .map(|&b| (b.label(), b == backend))
+                .collect(),
+            backend.summary(),
+        ),
+    ];
+    frame.render_widget(Paragraph::new(lines).block(panel("Options")), area);
 }
 
 fn draw_files(
@@ -997,7 +1034,7 @@ fn draw_files(
     let list = List::new(rows).block(block);
     let list = match focus {
         Focus::Files => list.highlight_style(highlight()).highlight_symbol("› "),
-        Focus::Tools => list.highlight_symbol("  "),
+        Focus::Tools | Focus::Options => list.highlight_symbol("  "),
     };
     frame.render_stateful_widget(list, area, state);
 }
@@ -1606,50 +1643,79 @@ mod tests {
         }
     }
 
-    #[test]
-    fn asks_what_to_remove_then_the_model_offering_tiger_first() {
-        let mut app = picking_files();
-        let separation = Tool::ALL
-            .iter()
-            .position(|&t| t == Tool::DialogueSeparation);
-        app.tool_list.select(separation);
+    fn picking(tool: Tool, focus: Focus) -> App {
+        let mut app = idle(Screen::Pick { focus });
+        app.tool_list
+            .select(Tool::ALL.iter().position(|&t| t == tool));
+        app
+    }
 
-        press(&mut app, &[KeyCode::Enter, KeyCode::Down, KeyCode::Enter]);
-
-        let Screen::PickBackend { keep, list } = &app.screen else {
-            panic!("expected the model picker");
+    fn focus(app: &App) -> Focus {
+        let Screen::Pick { focus } = app.screen else {
+            panic!("expected the picker");
         };
-        let selected = list.selected().map(|i| Backend::CHOICES[i]);
-        assert_eq!((*keep, selected), (Keep::Ambience, Some(Backend::Tiger)));
+        focus
     }
 
     #[test]
-    fn backs_out_of_the_model_picker_to_the_side_it_came_from() {
-        let mut app = idle(backend_picker(Keep::Ambience));
+    fn goes_from_a_tool_with_options_to_its_options_then_the_files() {
+        let mut app = picking(Tool::DialogueSeparation, Focus::Tools);
+
+        press(&mut app, &[KeyCode::Enter]);
+        assert_eq!(focus(&app), Focus::Options);
+
+        press(&mut app, &[KeyCode::Enter]);
+        assert_eq!(focus(&app), Focus::Files);
 
         press(&mut app, &[KeyCode::Esc]);
+        assert_eq!(focus(&app), Focus::Options);
 
-        let Screen::PickKeep { list, .. } = &app.screen else {
-            panic!("expected the side picker");
-        };
-        assert_eq!(
-            list.selected().map(|i| Keep::CHOICES[i]),
-            Some(Keep::Ambience)
+        press(&mut app, &[KeyCode::Esc]);
+        assert_eq!(focus(&app), Focus::Tools);
+    }
+
+    #[test]
+    fn skips_the_options_for_a_tool_without_any() {
+        let mut app = picking(Tool::Transcribe, Focus::Tools);
+
+        press(&mut app, &[KeyCode::Enter]);
+        assert_eq!(focus(&app), Focus::Files);
+
+        press(&mut app, &[KeyCode::Esc]);
+        assert_eq!(focus(&app), Focus::Tools);
+    }
+
+    #[tokio::test]
+    async fn runs_a_separation_with_the_chosen_options() {
+        let mut app = picking(Tool::DialogueSeparation, Focus::Options);
+
+        press(
+            &mut app,
+            &[
+                KeyCode::Right,
+                KeyCode::Down,
+                KeyCode::Right,
+                KeyCode::Enter,
+                KeyCode::Enter,
+            ],
         );
+
+        let Screen::Running { job, .. } = &app.screen else {
+            panic!("expected a run");
+        };
+        assert_eq!(*job, Job::Separate(Keep::Ambience, Backend::Sam));
     }
 
     #[test]
-    fn backs_out_of_the_side_picker_to_the_files() {
-        let mut app = idle(keep_picker(None));
+    fn offers_tiger_first_and_wraps_around_the_choices() {
+        let mut app = picking(Tool::DialogueSeparation, Focus::Options);
+        assert_eq!(app.backend, Backend::Tiger);
 
-        press(&mut app, &[KeyCode::Esc]);
+        press(&mut app, &[KeyCode::Down, KeyCode::Left]);
+        assert_eq!(app.backend, Backend::Sam);
 
-        assert!(matches!(
-            app.screen,
-            Screen::Pick {
-                focus: Focus::Files
-            }
-        ));
+        press(&mut app, &[KeyCode::Right]);
+        assert_eq!(app.backend, Backend::Tiger);
     }
 
     #[test]
