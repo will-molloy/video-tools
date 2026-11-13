@@ -6,11 +6,10 @@ use std::{fmt, path::Path, process::Stdio, time::Duration};
 
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Deserializer};
-use tokio::{
-    io::{AsyncBufReadExt, AsyncReadExt, BufReader},
-    process::Command,
-};
+use tokio::process::Command;
 use tokio_util::sync::CancellationToken;
+
+use crate::process;
 
 /// A chapter marker stored in the container.
 #[derive(Debug, Clone, PartialEq)]
@@ -212,8 +211,7 @@ impl fmt::Display for Cancelled {
 
 impl std::error::Error for Cancelled {}
 
-/// Streams every packet in the file to `on_packet`, one ffprobe output line at a time, so
-/// ffprobe's output is never buffered whole.
+/// Streams every packet in the file to `on_packet`, one ffprobe output line at a time.
 ///
 /// Cancelling `cancel` kills ffprobe, waits for it to exit, and returns [`Cancelled`].
 pub async fn packets(
@@ -221,66 +219,19 @@ pub async fn packets(
     cancel: &CancellationToken,
     mut on_packet: impl FnMut(Packet),
 ) -> Result<()> {
-    let mut child = Command::new("ffprobe")
+    let mut command = Command::new("ffprobe");
+    command
         .args(["-v", "error", "-of", "compact=p=0"])
         .args(["-show_entries", "packet=stream_index,pts,duration,flags"])
         .arg("-i")
-        .arg(path)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        // Backstop for the early returns below. Cancellation kills explicitly so it can also reap
-        // the process.
-        .kill_on_drop(true)
-        .spawn()
-        .context("failed to run ffprobe; is it installed and on PATH?")?;
-
-    // Drain stderr concurrently. A pipe nobody reads fills up and blocks ffprobe mid-write.
-    let mut stderr = child.stderr.take().context("ffprobe stderr not captured")?;
-    let stderr_task = tokio::spawn(async move {
-        let mut buf = Vec::new();
-        stderr.read_to_end(&mut buf).await.map(|_| buf)
-    });
-
-    let mut stdout = BufReader::new(child.stdout.take().context("ffprobe stdout not captured")?);
-    let mut line = String::new();
-
-    // Created once and polled by reference, so each loop iteration doesn't register a new waiter.
-    let cancelled = cancel.cancelled();
-    tokio::pin!(cancelled);
-
-    loop {
-        line.clear();
-        // `biased` polls cancellation first rather than in random order, so a steady stream of
-        // ready lines can't delay it. `read_line` loses partial input when the other branch wins,
-        // which doesn't matter because cancelling abandons the output.
-        let read = tokio::select! {
-            biased;
-            () = &mut cancelled => {
-                child.kill().await.context("failed to stop ffprobe")?;
-                return Err(Cancelled.into());
-            }
-            read = stdout.read_line(&mut line) => read.context("failed to read ffprobe output")?,
-        };
-        if read == 0 {
-            break;
-        }
-        if let Some(packet) = parse_packet(line.trim_end())? {
+        .arg(path);
+    process::stream_lines(command, "ffprobe", cancel, |line| {
+        if let Some(packet) = parse_packet(line)? {
             on_packet(packet);
         }
-    }
-
-    let status = child.wait().await.context("failed to wait for ffprobe")?;
-    let stderr = stderr_task
-        .await
-        .context("ffprobe stderr reader panicked")?
-        .context("failed to read ffprobe stderr")?;
-    if !status.success() {
-        bail!(
-            "ffprobe failed: {}",
-            String::from_utf8_lossy(&stderr).trim()
-        );
-    }
+        Ok(())
+    })
+    .await?;
     Ok(())
 }
 

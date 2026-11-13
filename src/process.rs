@@ -1,4 +1,94 @@
-//! Process queries that differ between Unix and Windows.
+//! Child processes, and process queries that differ between Unix and Windows.
+
+use std::process::Stdio;
+
+use anyhow::{Context, Result, bail};
+use tokio::{
+    io::{AsyncBufReadExt, AsyncReadExt, BufReader},
+    process::Command,
+};
+use tokio_util::sync::CancellationToken;
+
+use crate::ffprobe::Cancelled;
+
+/// Runs `command`, passing each line of its stdout to `on_line` as it arrives, so the output is
+/// never buffered whole. Returns its stderr once it exits successfully. `name` names the program
+/// in errors.
+///
+/// Cancelling `cancel` kills the program, waits for it to exit, and returns [`Cancelled`].
+pub async fn stream_lines(
+    mut command: Command,
+    name: &str,
+    cancel: &CancellationToken,
+    mut on_line: impl FnMut(&str) -> Result<()>,
+) -> Result<String> {
+    let mut child = command
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        // Backstop for the early returns below. Cancellation kills explicitly so it can also reap
+        // the process.
+        .kill_on_drop(true)
+        .spawn()
+        .with_context(|| format!("failed to run {name}; is it installed and on PATH?"))?;
+
+    // Drain stderr concurrently. A pipe nobody reads fills up and blocks the program mid-write.
+    let mut stderr = child
+        .stderr
+        .take()
+        .with_context(|| format!("{name} stderr not captured"))?;
+    let stderr_task = tokio::spawn(async move {
+        let mut buf = Vec::new();
+        stderr.read_to_end(&mut buf).await.map(|_| buf)
+    });
+
+    let mut stdout = BufReader::new(
+        child
+            .stdout
+            .take()
+            .with_context(|| format!("{name} stdout not captured"))?,
+    );
+    let mut line = String::new();
+
+    // Created once and polled by reference, so each loop iteration doesn't register a new waiter.
+    let cancelled = cancel.cancelled();
+    tokio::pin!(cancelled);
+
+    loop {
+        line.clear();
+        // `biased` polls cancellation first rather than in random order, so a steady stream of
+        // ready lines can't delay it. `read_line` loses partial input when the other branch wins,
+        // which doesn't matter because cancelling abandons the output.
+        let read = tokio::select! {
+            biased;
+            () = &mut cancelled => {
+                child.kill().await.with_context(|| format!("failed to stop {name}"))?;
+                return Err(Cancelled.into());
+            }
+            read = stdout.read_line(&mut line) => {
+                read.with_context(|| format!("failed to read {name} output"))?
+            }
+        };
+        if read == 0 {
+            break;
+        }
+        on_line(line.trim_end())?;
+    }
+
+    let status = child
+        .wait()
+        .await
+        .with_context(|| format!("failed to wait for {name}"))?;
+    let stderr = stderr_task
+        .await
+        .with_context(|| format!("{name} stderr reader panicked"))?
+        .with_context(|| format!("failed to read {name} stderr"))?;
+    let stderr = String::from_utf8_lossy(&stderr).into_owned();
+    if !status.success() {
+        bail!("{name} failed: {}", stderr.trim());
+    }
+    Ok(stderr)
+}
 
 /// Whether a process with `pid` exists and hasn't exited.
 #[cfg(unix)]
