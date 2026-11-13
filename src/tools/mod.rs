@@ -11,6 +11,7 @@ use crate::display;
 pub mod chapters;
 pub mod cli;
 pub mod dialogue_separation;
+pub mod loudness_check;
 pub mod sync_check;
 pub mod transcribe;
 
@@ -49,14 +50,16 @@ pub fn suggest_force(e: anyhow::Error) -> anyhow::Error {
 pub enum Tool {
     Chapters,
     SyncCheck,
+    LoudnessCheck,
     Transcribe,
     DialogueSeparation,
 }
 
 impl Tool {
-    pub const ALL: [Tool; 4] = [
+    pub const ALL: [Tool; 5] = [
         Tool::Chapters,
         Tool::SyncCheck,
+        Tool::LoudnessCheck,
         Tool::Transcribe,
         Tool::DialogueSeparation,
     ];
@@ -65,6 +68,7 @@ impl Tool {
         match self {
             Tool::Chapters => "Chapters",
             Tool::SyncCheck => "Sync Check",
+            Tool::LoudnessCheck => "Loudness Check",
             Tool::Transcribe => "Transcribe",
             Tool::DialogueSeparation => "Dialogue Separation",
         }
@@ -74,6 +78,7 @@ impl Tool {
         match self {
             Tool::Chapters => "YouTube description chapter list",
             Tool::SyncCheck => "Diagnose audio/video sync problems",
+            Tool::LoudnessCheck => "Check YouTube loudness targets",
             Tool::Transcribe => "Extract dialogue to .srt file",
             Tool::DialogueSeparation => "Remove background noise or dialogue",
         }
@@ -82,8 +87,9 @@ impl Tool {
     /// How many files the tool runs on at once.
     pub fn max_parallel(self) -> usize {
         match self {
-            // Each run is one ffprobe process, so the limit is the number of CPU threads.
-            Tool::Chapters | Tool::SyncCheck => {
+            // Each run is one ffprobe or ffmpeg process on one core, so the limit is the number of
+            // CPU threads.
+            Tool::Chapters | Tool::SyncCheck | Tool::LoudnessCheck => {
                 std::thread::available_parallelism().map_or(1, NonZero::get)
             }
 
