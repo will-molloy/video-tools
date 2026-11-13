@@ -2,7 +2,7 @@
 name = "vt-ml"
 version = "0.1.0"
 description = "The machine-learning subcommands of vt"
-requires-python = ">=3.12,<3.13"
+requires-python = ">=3.15,<3.16"
 dependencies = [
   # laion-clap, a SAM Audio dependency, caps numpy below 2.
   "numpy>=1.26.4",
@@ -21,8 +21,8 @@ sam = [
   "torch==2.11.0",
   "torchaudio==2.11.0",
   # Each torchcodec release is built against one torch minor version.
-  "torchcodec>=0.11.1,<0.12",
-  "torchvision==0.26.0",
+  "torchcodec>=0.17,<0.18",
+  "torchvision==0.29.1+rocm7.2",
 ]
 tiger = [
   "huggingface-hub>=0.36.0",
@@ -32,13 +32,13 @@ tiger = [
 rocm = [
   "torch==2.11.0",
   "torchaudio==2.11.0",
-  "torchvision==0.26.0",
+  "torchvision==0.29.1+rocm7.2",
   "triton-rocm",
 ]
 cuda = [
   "torch==2.11.0",
   "torchaudio==2.11.0",
-  "torchvision==0.26.0",
+  "torchvision==0.29.1+rocm7.2",
 ]
 
 [project.scripts]
@@ -48,7 +48,7 @@ vt-ml = "vt_ml.cli:main"
 dev = ["pytest>=9.1.1"]
 
 [build-system]
-requires = ["uv_build>=0.12.19,<0.13"]
+requires = ["uv_build>=0.13.8,<0.14"]
 build-backend = "uv_build"
 
 [tool.uv]
