@@ -148,7 +148,7 @@ impl fmt::Display for Progress {
 }
 
 /// `M:SS`, or `H:MM:SS` from an hour.
-fn clock(time: Duration) -> String {
+pub fn clock(time: Duration) -> String {
     let secs = time.as_secs();
     let (hours, minutes, seconds) = (secs / 3600, secs / 60 % 60, secs % 60);
     if hours > 0 {

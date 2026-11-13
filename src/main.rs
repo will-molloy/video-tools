@@ -13,7 +13,7 @@ use clap::{Parser, Subcommand};
 
 use tools::{
     Tool, chapters::ChaptersArgs, dialogue_separation::DialogueSeparationArgs,
-    sync_check::SyncCheckArgs, transcribe::TranscribeArgs,
+    loudness_check::LoudnessCheckArgs, sync_check::SyncCheckArgs, transcribe::TranscribeArgs,
 };
 
 /// Video processing toolbox. Run without a subcommand to open the TUI.
@@ -32,6 +32,9 @@ enum Command {
     #[command(about = Tool::SyncCheck.summary())]
     SyncCheck(SyncCheckArgs),
 
+    #[command(about = Tool::LoudnessCheck.summary())]
+    LoudnessCheck(LoudnessCheckArgs),
+
     #[command(about = Tool::Transcribe.summary())]
     Transcribe(TranscribeArgs),
 
@@ -45,6 +48,7 @@ async fn main() -> ExitCode {
         None => tui::run().await.map(|()| ExitCode::SUCCESS),
         Some(Command::Chapters(args)) => tools::chapters::cli(&args).await,
         Some(Command::SyncCheck(args)) => tools::sync_check::cli(&args).await,
+        Some(Command::LoudnessCheck(args)) => tools::loudness_check::cli(&args).await,
         Some(Command::Transcribe(args)) => tools::transcribe::cli(&args).await,
         Some(Command::DialogueSeparation(args)) => tools::dialogue_separation::cli(&args).await,
     };

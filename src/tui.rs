@@ -36,6 +36,7 @@ use crate::{
         self, Tool,
         chapters::{self, Outcome},
         dialogue_separation::{self, Backend, Keep},
+        loudness_check::{self, Verdict},
         sync_check::{self, Report, diagnose::Severity, thousands},
         transcribe,
     },
@@ -135,6 +136,7 @@ impl FileRun {
 #[derive(Debug, Clone, PartialEq)]
 enum Progress {
     Scan(sync_check::Progress),
+    LoudnessCheck(loudness_check::Progress),
     Transcription(transcribe::Progress),
     Separation(dialogue_separation::Progress),
 }
@@ -375,6 +377,7 @@ impl App {
                         Some(match tool {
                             Tool::Chapters => start(Job::Chapters),
                             Tool::SyncCheck => start(Job::SyncCheck),
+                            Tool::LoudnessCheck => start(Job::LoudnessCheck),
                             Tool::Transcribe => start(Job::Transcribe),
                             Tool::DialogueSeparation => {
                                 start(Job::Separate(self.keep, self.backend))
@@ -713,7 +716,9 @@ fn result_lines(files: &[FileRun], name_width: usize) -> (ToolOutput, Vec<(usize
 fn has_options(tool_list: &ListState) -> bool {
     match tool_list.selected().and_then(|i| Tool::ALL.get(i)) {
         Some(Tool::DialogueSeparation) => true,
-        Some(Tool::Chapters | Tool::SyncCheck | Tool::Transcribe) | None => false,
+        Some(Tool::Chapters | Tool::SyncCheck | Tool::LoudnessCheck | Tool::Transcribe) | None => {
+            false
+        }
     }
 }
 
@@ -729,6 +734,7 @@ fn cycle<T: Copy + PartialEq>(choices: &[T], current: T, forward: bool) -> T {
 enum Job {
     Chapters,
     SyncCheck,
+    LoudnessCheck,
     Transcribe,
     Separate(Keep, Backend),
 }
@@ -738,6 +744,7 @@ impl Job {
         match self {
             Job::Chapters => Tool::Chapters,
             Job::SyncCheck => Tool::SyncCheck,
+            Job::LoudnessCheck => Tool::LoudnessCheck,
             Job::Transcribe => Tool::Transcribe,
             Job::Separate(..) => Tool::DialogueSeparation,
         }
@@ -748,7 +755,7 @@ impl Job {
 fn subtitle(job: Job) -> Option<String> {
     match job {
         Job::Separate(keep, backend) => Some(format!("{} ({})", keep.label(), backend.label())),
-        Job::Chapters | Job::SyncCheck | Job::Transcribe => None,
+        Job::Chapters | Job::SyncCheck | Job::LoudnessCheck | Job::Transcribe => None,
     }
 }
 
@@ -885,6 +892,11 @@ async fn run_job(
         })
         .await
         .map(|report| sync_check_lines(&report)),
+        Job::LoudnessCheck => loudness_check::run(file, cancel, |p| {
+            progress.send_replace(Some(Progress::LoudnessCheck(p)));
+        })
+        .await
+        .map(|report| loudness_check_lines(&report)),
         Job::Transcribe => {
             transcribe::run(file, transcribe::Backend::Whisper, force, cancel, |p| {
                 progress.send_replace(Some(Progress::Transcription(p)));
@@ -930,6 +942,21 @@ fn chapters_lines(file: &Path, outcome: Outcome) -> ToolOutput {
             lines
         }
     }
+}
+
+fn loudness_check_lines(report: &loudness_check::Report) -> ToolOutput {
+    report
+        .rows()
+        .into_iter()
+        .map(|row| {
+            let line = Line::from(row.text);
+            match row.verdict {
+                Some(Verdict::Pass) => line.green(),
+                Some(Verdict::Fail) => line.red(),
+                None => line,
+            }
+        })
+        .collect()
 }
 
 fn sync_check_lines(report: &Report) -> ToolOutput {
@@ -1181,6 +1208,10 @@ fn draw_progress(frame: &mut Frame, area: Rect, progress: Option<Progress>) {
     match progress {
         None => {}
         Some(Progress::Scan(progress)) => draw_scan_progress(frame, area, progress),
+        Some(Progress::LoudnessCheck(progress)) => match progress.ratio() {
+            Some(ratio) => frame.render_widget(gauge(ratio, progress.to_string()), area),
+            None => frame.render_widget(Line::from(progress.to_string()), area),
+        },
         Some(Progress::Transcription(progress)) => match progress.ratio() {
             Some(ratio) => frame.render_widget(gauge(ratio, progress.to_string()), area),
             None => frame.render_widget(Line::from(progress.to_string()), area),
