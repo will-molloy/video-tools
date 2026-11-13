@@ -13,12 +13,12 @@ dependencies = [
 # extra goes with one GPU extra, `rocm` or `cuda`, which picks the torch build.
 [project.optional-dependencies]
 whisper = [
-  "torch==2.11.0",
+  "torch==2.13.0+rocm7.2",
   "transformers>=5.20.1",
 ]
 sam = [
   "sam-audio",
-  "torch==2.11.0",
+  "torch==2.13.0+rocm7.2",
   "torchaudio==2.11.0",
   # Each torchcodec release is built against one torch minor version.
   "torchcodec>=0.11.1,<0.12",
@@ -27,16 +27,16 @@ sam = [
 tiger = [
   "huggingface-hub>=0.36.0",
   "safetensors>=0.7.0",
-  "torch==2.11.0",
+  "torch==2.13.0+rocm7.2",
 ]
 rocm = [
-  "torch==2.11.0",
+  "torch==2.13.0+rocm7.2",
   "torchaudio==2.11.0",
   "torchvision==0.26.0",
   "triton-rocm",
 ]
 cuda = [
-  "torch==2.11.0",
+  "torch==2.13.0+rocm7.2",
   "torchaudio==2.11.0",
   "torchvision==0.26.0",
 ]
