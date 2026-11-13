@@ -42,10 +42,10 @@ jobs:
 
       - name: Bump version
         id: version
-        uses: paulhatch/semantic-version@v6.0.2
+        uses: paulhatch/semantic-version@v6.0.7
 
       - name: Create GitHub tag and release
-        uses: softprops/action-gh-release@v3.0.1
+        uses: softprops/action-gh-release@v3.0.4
         with:
           tag_name: ${{ steps.version.outputs.version_tag }}
           target_commitish: ${{ github.sha }}
