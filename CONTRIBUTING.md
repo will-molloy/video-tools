@@ -61,4 +61,5 @@ tests/fixtures/gen.sh --check  # check each fixture has its intended defect
 ### Commits
 
 - Commits and PR titles follow [Conventional Commits](https://www.conventionalcommits.org).
-- Merges to `main` tag a release, with the version bump derived from those commits.
+- [release-please](https://github.com/googleapis/release-please) keeps a release PR open, with the version bump and `CHANGELOG.md` derived from those commits.
+  Merging it tags a release.
