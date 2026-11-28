@@ -1,5 +1,30 @@
 # Changelog
 
+## [0.10.0](https://github.com/will-molloy/video-tools/compare/v0.9.3...v0.10.0) (2026-11-28)
+
+
+### ✨ Features
+
+* print the version with vt --version ([ab0b207](https://github.com/will-molloy/video-tools/commit/ab0b207f96f3af3540c4461ad4f61834628d1bd2))
+
+
+### 📝 Documentation
+
+* backfill changelog from github releases ([eb539b6](https://github.com/will-molloy/video-tools/commit/eb539b6a8afa75993f0ca426720704bfc62e8e1f))
+
+
+### 👷 CI
+
+* build on macos too ([ab68c0d](https://github.com/will-molloy/video-tools/commit/ab68c0da92bdaf5944e094b88b23bf289be447ce))
+* rename conventional-commits workflow to commitlint ([8ab32f7](https://github.com/will-molloy/video-tools/commit/8ab32f7a0f917a995db7083b46d37d8da97bbda2))
+* switch releases to release-please ([69c94af](https://github.com/will-molloy/video-tools/commit/69c94afed78538d9b4ca8109776f7c38a0db9e95))
+* switch releases to release-please ([#27](https://github.com/will-molloy/video-tools/issues/27)) ([53878b5](https://github.com/will-molloy/video-tools/commit/53878b5364a2426d0c879fcdc63ddab754bc86b2))
+
+
+### 🔧 Miscellaneous
+
+* use semantic commits for renovate PRs ([c83ea90](https://github.com/will-molloy/video-tools/commit/c83ea90c578bcf1216bac9772f94933832aea3a1))
+
 ## [0.9.3](https://github.com/will-molloy/video-tools/compare/v0.9.2...v0.9.3) (2026-11-13)
 
 ### 🔧 Miscellaneous
