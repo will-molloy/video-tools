@@ -2,9 +2,12 @@
   "$schema": "https://docs.renovatebot.com/renovate-schema.json",
   "extends": [
     "config:recommended",
-    "schedule:monthly"
+    "schedule:monthly",
+    ":semanticCommits"
   ],
+  "ignorePresets": [":semanticPrefixFixDepsChoreOthers"],
   "labels": ["dependencies"],
+  "minimumReleaseAge": "3 days",
   "separateMajorMinor": false,
   "packageRules": [
     {
@@ -19,6 +22,20 @@
     {
       "groupName": "ci/cd dependencies",
       "matchCategories": ["ci", "cd", "docker"]
+    },
+    {
+      "groupName": "ci/cd dependencies",
+      "matchManagers": ["custom.regex"]
+    }
+  ],
+  "customManagers": [
+    {
+      "customType": "regex",
+      "description": "versions in workflows tagged with a `# renovate:` comment",
+      "managerFilePatterns": ["/^\\.github/workflows/.+\\.ya?ml$/"],
+      "matchStrings": [
+        "# renovate: datasource=(?<datasource>\\S+) depName=(?<depName>\\S+)\\s+\\w+: (?<currentValue>\\S+)"
+      ]
     }
   ]
 }

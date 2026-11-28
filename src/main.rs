@@ -18,7 +18,7 @@ use tools::{
 
 /// Video processing toolbox. Run without a subcommand to open the TUI.
 #[derive(Debug, Parser)]
-#[command(name = "vt")]
+#[command(name = "vt", version)]
 struct Cli {
     #[command(subcommand)]
     command: Option<Command>,
